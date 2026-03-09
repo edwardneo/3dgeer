@@ -40,7 +40,7 @@ Bosch Center for AI, Bosch Research North America
 </div>
 
 ## 😺Key Features
-This repository contains the official authors implementation associated with the [**ICLR 2026**](https://iclr.cc/virtual/2026/poster/10011512) paper "3DGEER: 3D Gaussian Rendering Made Exact and Efficient for Generic Cameras". The `gsplat-geer` OSS extension can be found [here](#special-extension-oss-acknowledgements).
+This repository contains the official authors implementation associated with the [**ICLR 2026**](https://iclr.cc/virtual/2026/poster/10011512) paper "3DGEER: 3D Gaussian Rendering Made Exact and Efficient for Generic Cameras". The `gsplat-geer` OSS extension can be found [here](#special-extension).
 <div class="row">
     <div class="col-md-8 col-md-offset-2">
         <section>
@@ -70,8 +70,8 @@ This repository contains the official authors implementation associated with the
 
 
 ## 🎉News
-- **TBD**: `drivestudio-geer` and `stormGaussian-geer` will be released [here](#special-extension-oss-acknowledgements) as well!
-- **2026-03-09**: `gsplat-geer` released [here](#special-extension-oss-acknowledgements)!
+- **TBD**: `drivestudio-geer` and `stormGaussian-geer` will be released [here](#special-extension) as well!
+- **2026-03-09**: `gsplat-geer` released [here](#special-extension)!
 - **2026-03-09**: Code released! Can Gaussian rendering be both exact and fast without relying on lossy splatting? **Check out 3DGEER**!
 - **2026-03-09**: Code release approved. License updated. Requested admin to push code to BoschResearch.
 - **2026-01-25**: 3DGEER accepted to **ICLR 2026**, with an [initial review](https://openreview.net/forum?id=4voMNlRWI7) of average **7** (top 1% score).
