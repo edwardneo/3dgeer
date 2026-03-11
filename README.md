@@ -5,11 +5,30 @@
 
 Bosch Center for AI, Bosch Research North America
 
-<a href="https://arxiv.org/abs/2505.24053"><img src='https://img.shields.io/badge/arXiv-3DGEER-red' alt='ArXiv'></a>
-<a href="https://openreview.net/forum?id=4voMNlRWI7"><img src='https://img.shields.io/badge/OpenReview-3DGEER-orange' alt='OpenReview'></a>
-<a href="https://iclr.cc/virtual/2026/poster/10011512"><img src='https://img.shields.io/badge/ICLR_2026-3DGEER-blue' alt='ICLR 2026'></a>
-<a href='https://zixunh.github.io/3d-geer/'><img src='https://img.shields.io/badge/Project_Page-3DGEER-green' alt='Project Page'></a>
-<a href='https://www.youtube.com/watch?v=Grl9jSMIgds'><img src='https://img.shields.io/badge/Video-3DGEER-yellow' alt='Video'></a>
+<a href="https://arxiv.org/abs/2505.24053">
+  <img src="https://img.shields.io/badge/arXiv-2505.24053-red" alt="arXiv">
+</a>
+
+<a href="https://openreview.net/forum?id=4voMNlRWI7">
+  <img src="https://img.shields.io/badge/OpenReview-Top_1%25_Score-orange" alt="OpenReview">
+</a>
+
+<a href="https://iclr.cc/virtual/2026/poster/10011512">
+  <img src="https://img.shields.io/badge/ICLR-2026-blue" alt="ICLR 2026">
+</a>
+
+<a href="https://zixunh.github.io/3d-geer/">
+  <img src="https://img.shields.io/badge/Project_Page-3DGEER-green" alt="Project Page">
+</a>
+
+<a href="https://github.com/boschresearch/3dgeer/tree/gsplat-geer">
+  <img src="https://img.shields.io/badge/gsplat--geer-Extension-purple" alt="Project Page">
+</a>
+
+<a href="https://www.youtube.com/watch?v=Grl9jSMIgds">
+  <img src="https://img.shields.io/badge/Video-YouTube-yellow" alt="Video">
+</a>
+
 
 <p align="center">
   <a href='https://zixunh.github.io/3d-geer'>
@@ -88,6 +107,8 @@ The full CUDA implementation can be found here: [./submodules/geer-rasterizer/](
     <img src="assets/forward2backward.gif" width="60%">
   </div>
 
+#### Key Insights: Fixing the Math Behind Gaussian Association
+
 - Particle Bounding Frustum: Efficient AABB for ray–particle association. (See [paper](https://arxiv.org/pdf/2505.24053) Appendix D for the math.)
 
   <div align="center">
@@ -95,7 +116,7 @@ The full CUDA implementation can be found here: [./submodules/geer-rasterizer/](
   </div>
 
 #### Conda Based Installation
-Following the 3dgs dependencies https://github.com/graphdeco-inria/gaussian-splatting, and then run the following command to replace the CUDA rasterizer for a geer-version 3dgs environment:
+Following the 3dgs dependencies https://github.com/graphdeco-inria/gaussian-splatting to install the 3dgs environment, and then run the following command to replace the `diff-gaussian-rasterization` for using a geer-version CUDA rasterizer:
 ```sh
 pip install ./submodules/geer-rasterizer
 ```
@@ -145,7 +166,7 @@ To train 3DGEER on scannet++ data:
 ```bash
 bash ./scripts/train_scnt.sh
 ```
-> full training scripts will be released soon.
+> full training codes and scripts will be released soon.
 
 ### 3. Rendering & Evaluation
 To render high-quality images and compute PSNR/SSIM/LPIPS:
@@ -156,7 +177,7 @@ bash scripts/eval_scnt.sh <SCENE_ID> <DATA_ROOT> <CKPT_DIR> <MODE>
 
 **Arguments:**
 
-`SCENE_ID` : scene name (e.g. steakhouse, 1d003b07bd/dslr)
+`SCENE_ID` : scene name (e.g. `steakhouse`, `1d003b07bd/dslr`)
 
 `DATA_ROOT` : root directory of the formatted dataset
 
@@ -164,8 +185,8 @@ bash scripts/eval_scnt.sh <SCENE_ID> <DATA_ROOT> <CKPT_DIR> <MODE>
 
 `MODE` : rendering backend, (`BEAP`, `KB` or `PH`)
 
-> set `DIST_SCALING` as 0 in the shell to render EQ under KB mode.
-> enlarge the value of `FOCAL_SCALING` to test extreme large FoV.
+> Set `DIST_SCALING` as 0 in the shell to render EQ under KB mode;
+> Enlarge the value of `FOCAL_SCALING` to test extreme large FoV;
 > For fair comparison, we recommend evaluating with `BEAP` mode, which ensures consistent metric computation across different rendering backends.
 
 **Example:**
@@ -176,7 +197,7 @@ bash scripts/render_scnt.sh steakhouse data/aria/scannetpp_formatted ckpt/aria K
 bash scripts/eval_scnt.sh steakhouse data/aria/scannetpp_formatted ckpt/aria KB
 bash scripts/eval_scnt.sh steakhouse data/aria/scannetpp_formatted ckpt/aria BEAP
 ```
-Scannet++ dataset
+ScanNet++ dataset
 ```bash
 bash scripts/render_scnt.sh 1d003b07bd/dslr data/scnt/datasets ckpt/scnt KB
 bash scripts/eval_scnt.sh 1d003b07bd/dslr data/scnt/datasets ckpt/scnt KB
@@ -188,12 +209,13 @@ bash scripts/render_scnt.sh truck data/tt/datasets ckpt/tt PH
 bash scripts/eval_scnt.sh truck data/tt/datasets ckpt/tt PH
 bash scripts/eval_scnt.sh truck data/tt/datasets ckpt/tt BEAP
 ```
+> Please ensure that the corresponding ground truth is used. For example, evaluating extreme KB images using the original KB images as ground truth is invalid due to mismatched distortion parameters.
 
 ### 4. Available Checkpoints
 You can download the pre-trained checkpoints for the scenes shown on our project webpage:
-- Scannet++: Kitchen, Lab, Officeroom, Bedroom
+- ScanNet++: Kitchen, Lab, Officeroom, Bedroom
 - ZipNeRF: Alameda, Berlin, London, NYC
-- Aria: Livingroom, Steakhouse
+- Aria: Livingroom, Steakhouse, Garden
 - Tank and Temples: Train, Truck
 - Customized Parking: Bosch Center
 
