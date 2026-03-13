@@ -53,7 +53,9 @@ namespace FORWARD
 		uint32_t* tiles_touched,
 		bool prefiltered,
 		bool antialiasing,
-		int mode);
+		int mode,
+		float near_threshold = 0.2f,
+		int asso_mode = 0);
 
 	// Main rasterization method.
 	void render(

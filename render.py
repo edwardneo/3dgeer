@@ -23,8 +23,9 @@ from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 from utils.image_utils import psnr
 import numpy as np
+import cv2
 
-def render_set(model_path,name, iteration, views, gaussians, pipeline, background, train_test_exp):
+def render_set(model_path, mask_tensor, name, iteration, views, gaussians, pipeline, background, train_test_exp, near_threshold=0.2, asso_mode=0):
     max_allocated_memory_before = torch.cuda.max_memory_allocated()
     print(f"Max Allocated Memory Before Rendering: {max_allocated_memory_before} bytes")
     torch.cuda.empty_cache()
@@ -49,7 +50,7 @@ def render_set(model_path,name, iteration, views, gaussians, pipeline, backgroun
     range_lens = []
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         render_start = time.time()
-        rendering_pkg = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp)
+        rendering_pkg = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, near_threshold=near_threshold, asso_mode=asso_mode)
         render_end = time.time()
 
         rendering = rendering_pkg["render"]
@@ -68,6 +69,8 @@ def render_set(model_path,name, iteration, views, gaussians, pipeline, backgroun
 
         image_save_start = time.time()
         gt = view.original_image[0:3, :, :]
+        if mask_tensor is not None:
+            rendering[mask_tensor == 0] = 0.0
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 
@@ -117,7 +120,7 @@ def render_set(model_path,name, iteration, views, gaussians, pipeline, backgroun
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, \
                 fov_mod: float, sample_step: float, render_model: str, \
-                focal_scaling: float, distortion_scaling: float, mirror_shift: float, raymap_path=None):
+                focal_scaling: float, distortion_scaling: float, mirror_shift: float, raymap_path: str, mask_path: str, near_threshold: float = 0.2, asso_mode: int = 0):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         dataset.fov_mod = fov_mod
@@ -132,16 +135,21 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         dataset.mirror_shift = mirror_shift
 
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, skip_train_cameras=skip_train, skip_test_cameras=skip_test)
+        valid_mask = None
+        if mask_path is not None:
+            valid_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            valid_mask = np.repeat(valid_mask[None, ...], 3, axis=0)
+            valid_mask = torch.tensor(valid_mask)
 
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
-             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, dataset.train_test_exp)
+             render_set(dataset.model_path, valid_mask, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, dataset.train_test_exp, near_threshold, asso_mode)
 
         if not skip_test:
              dataset.train_test_exp = False
-             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, dataset.train_test_exp)
+             render_set(dataset.model_path, valid_mask, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, dataset.train_test_exp, near_threshold, asso_mode)
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -157,12 +165,20 @@ if __name__ == "__main__":
     parser.add_argument("--distortion_scaling", type=float, default = 1.0)
     parser.add_argument("--mirror_shift", type=float, default = 0.0)
     parser.add_argument("--raymap_path", type=str, default = None)
+    parser.add_argument("--mask_path", type=str, default = None)
     parser.add_argument("--sample_step", type=float, default = None)
     parser.add_argument("--fov_mod", type=float, default = None)
+    parser.add_argument("--near_threshold", type=float, default = 0.2)
+    parser.add_argument("--asso_mode", type=int, default = 0,
+                        help="Association mode: 0=PBF (default), 1=EWA, 2=UT")
     args = get_combined_args(parser)
-    for k in ["fov_mod", "sample_step", "distortion_scaling", "focal_scaling", "mirror_shift", "raymap_path"]:
+    for k in ["fov_mod", "sample_step", "distortion_scaling", "focal_scaling", "mirror_shift", "raymap_path", "mask_path"]:
         if not hasattr(args, k):
             setattr(args, k, None)
+    if not hasattr(args, "near_threshold"):
+        setattr(args, "near_threshold", 0.2)
+    if not hasattr(args, "asso_mode"):
+        setattr(args, "asso_mode", 0)
     print("Rendering " + args.model_path)
 
     # Initialize system state (RNG)
@@ -170,4 +186,4 @@ if __name__ == "__main__":
 
     render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, \
                 args.fov_mod, args.sample_step, args.render_model, \
-                args.focal_scaling, args.distortion_scaling, args.mirror_shift, args.raymap_path)
+                args.focal_scaling, args.distortion_scaling, args.mirror_shift, args.raymap_path, args.mask_path, args.near_threshold, args.asso_mode)

@@ -1,4 +1,4 @@
-# Data Preparation of 3DGEER
+# Data Format Documentation of 3DGEER
 ## 1. ScanNet++ Dataset
 Download the dataset following the official [ScanNet++](https://scannetpp.mlsg.cit.tum.de/scannetpp/) instructions.
 ### Expected Directory Structure

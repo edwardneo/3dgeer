@@ -5,30 +5,12 @@
 
 Bosch Center for AI, Bosch Research North America
 
-<a href="https://arxiv.org/abs/2505.24053">
-  <img src="https://img.shields.io/badge/arXiv-2505.24053-red" alt="arXiv">
-</a>
-
-<a href="https://openreview.net/forum?id=4voMNlRWI7">
-  <img src="https://img.shields.io/badge/OpenReview-Top_1%25_Score-orange" alt="OpenReview">
-</a>
-
-<a href="https://iclr.cc/virtual/2026/poster/10011512">
-  <img src="https://img.shields.io/badge/ICLR-2026-blue" alt="ICLR 2026">
-</a>
-
-<a href="https://zixunh.github.io/3d-geer/">
-  <img src="https://img.shields.io/badge/Project_Page-3DGEER-green" alt="Project Page">
-</a>
-
-<a href="https://github.com/boschresearch/3dgeer/tree/gsplat-geer">
-  <img src="https://img.shields.io/badge/gsplat--geer-Extension-purple" alt="Project Page">
-</a>
-
-<a href="https://www.youtube.com/watch?v=Grl9jSMIgds">
-  <img src="https://img.shields.io/badge/Video-YouTube-yellow" alt="Video">
-</a>
-
+<a href="https://arxiv.org/abs/2505.24053"><img src="https://img.shields.io/badge/arXiv-2505.24053-red" alt="arXiv"></a>
+<a href="https://openreview.net/forum?id=4voMNlRWI7"><img src="https://img.shields.io/badge/OpenReview-Top_1%25_Score-orange" alt="OpenReview"></a>
+<a href="https://iclr.cc/virtual/2026/poster/10011512"><img src="https://img.shields.io/badge/ICLR-2026-blue" alt="ICLR 2026"></a>
+<a href="https://zixunh.github.io/3d-geer/"><img src="https://img.shields.io/badge/Project_Page-3DGEER-green" alt="Project Page"></a>
+<a href="https://github.com/boschresearch/3dgeer/tree/gsplat-geer"><img src="https://img.shields.io/badge/gsplat--geer-Extension-purple" alt="Project Page"></a>
+<a href="https://www.youtube.com/watch?v=Grl9jSMIgds"><img src="https://img.shields.io/badge/Video-YouTube-yellow" alt="Video"></a>
 
 <p align="center">
   <a href='https://zixunh.github.io/3d-geer'>
@@ -101,7 +83,7 @@ This repository contains the official authors implementation associated with the
 The full CUDA implementation can be found here: [./submodules/geer-rasterizer/](./submodules/geer-rasterizer/).
 #### Key Insights: Fixing the Math Behind Gaussian Rendering
 
-- Ray–Gaussian Integral (Forward & Backward): Analytical forward rendering and backward gradient computation. (See [paper](https://arxiv.org/pdf/2505.24053) Appendix C for the math.)
+- Ray–Gaussian Integral (Forward & Backward): Analytical forward rendering and numerical stable backward gradient computation. (See [paper](https://arxiv.org/pdf/2505.24053) Appendix C for the math.)
 
   <div align="center">
     <img src="assets/forward2backward.gif" width="60%">
@@ -120,7 +102,7 @@ Following the 3dgs dependencies https://github.com/graphdeco-inria/gaussian-spla
 ```sh
 pip install ./submodules/geer-rasterizer
 ```
-#### Docker Configuration
+#### Docker Configuration (Recommend)
 Set you data path and 3dgeer codebase path in `./docker/init_my_docker.sh`.
 ```sh
 # Build up 3dgs environments for 3DGEER. Example:
@@ -190,26 +172,10 @@ bash scripts/eval_scnt.sh <SCENE_ID> <DATA_ROOT> <CKPT_DIR> <MODE>
 > For fair comparison, we recommend evaluating with `BEAP` mode, which ensures consistent metric computation across different rendering backends.
 
 **Example:**
+See examples in [detailed train and eval documentation](./scripts).
 
-Aria dataset
-```bash
-bash scripts/render_scnt.sh steakhouse data/aria/scannetpp_formatted ckpt/aria KB
-bash scripts/eval_scnt.sh steakhouse data/aria/scannetpp_formatted ckpt/aria KB
-bash scripts/eval_scnt.sh steakhouse data/aria/scannetpp_formatted ckpt/aria BEAP
-```
-ScanNet++ dataset
-```bash
-bash scripts/render_scnt.sh 1d003b07bd/dslr data/scnt/datasets ckpt/scnt KB
-bash scripts/eval_scnt.sh 1d003b07bd/dslr data/scnt/datasets ckpt/scnt KB
-bash scripts/eval_scnt.sh 1d003b07bd/dslr data/scnt/datasets ckpt/scnt BEAP
-```
-Tanks and Temples dataset
-```bash
-bash scripts/render_scnt.sh truck data/tt/datasets ckpt/tt PH
-bash scripts/eval_scnt.sh truck data/tt/datasets ckpt/tt PH
-bash scripts/eval_scnt.sh truck data/tt/datasets ckpt/tt BEAP
-```
 > Please ensure that the corresponding ground truth is used. For example, evaluating extreme KB images using the original KB images as ground truth is invalid due to mismatched distortion parameters.
+
 
 ### 4. Available Checkpoints
 You can download the pre-trained checkpoints for the scenes shown on our project webpage:
@@ -229,7 +195,7 @@ https://huggingface.co/datasets/ZixunH/3DGEER_ckpt
 </p>
 
 ## ⛽️Contributing
-Feel free to drop a pull request whenever!
+Feel free to drop a [pull request](https://github.com/boschresearch/3dgeer/pulls) whenever!
 
 ## 👀Visuals ([More](https://zixunh.github.io/3d-geer))
 

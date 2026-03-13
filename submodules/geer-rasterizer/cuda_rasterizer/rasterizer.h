@@ -62,7 +62,9 @@ namespace CudaRasterizer
 			int mode,
 			int* radii = nullptr,
 			int* ranges = nullptr,
-			bool debug = false);
+			float near_threshold = 0.2f,
+			bool debug = false,
+			int asso_mode = 0);
 
 		static void backward(
 			const int P, int D, int M, int R,

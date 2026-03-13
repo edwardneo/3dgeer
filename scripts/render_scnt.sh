@@ -19,7 +19,7 @@ if [ "$MODE" = "BEAP" ]; then
 
 BEAP_DIR_EVAL="beap_fov_${FOVMOD_EVAL}_step_${STEP_EVAL}/"
 EVAL_MASK_FN="fov_${FOVMOD_EVAL}_step_${STEP_EVAL}_mask.png"
-python data/scnt/scnt_eq2beap.py --path "$DATASET_DIR" --dst "$BEAP_DIR_EVAL" --step "$STEP_EVAL" --fov_mod "$FOVMOD_EVAL" --mask_dst "$EVAL_MASK_FN"
+python data/scnt/scnt_kb2beap.py --path "$DATASET_DIR" --dst "$BEAP_DIR_EVAL" --step "$STEP_EVAL" --fov_mod "$FOVMOD_EVAL" --mask_dst "$EVAL_MASK_FN"
 
 echo "Rendering BEAP space"
 

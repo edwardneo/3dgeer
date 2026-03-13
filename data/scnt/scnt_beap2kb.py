@@ -5,8 +5,6 @@ from PIL import Image
 from tqdm import tqdm
 from pathlib import Path
 from argparse import ArgumentParser
-from scene.colmap_loader import read_intrinsics_binary
-
 
 def read_intrinsics_text(path):
     """
@@ -58,29 +56,29 @@ def colmap_main(args):
     
     # Use prepared fisheye grid map by DAC https://github.com/yuliangguo/depth_any_camera
     try:
-        grid_map_file = Path(args.path) / "grid_fisheye.npy"
-        grid_fisheye = np.load(grid_map_file)
+        grid_map_file = Path(args.path) / "raymap_fisheye.npy"
+        raymap_fisheye = np.load(grid_map_file)
         print("grid map file: ", grid_map_file)
     except:
         if args.gridmap_restrict:
             raise ValueError("Grid map restrict is not supported")
         else:
-            grid_fisheye = np.load("./gridmap/scannetpp/grid_fisheye.npy")
+            raymap_fisheye = np.load("./gridmap/scannetpp/raymap_fisheye.npy")
             print("WARNING: Grid map file may not match with the camera intrinsic;", grid_map_file)
 
-    # grid_isnan = cv2.resize(grid_fisheye[:, :, 3], (width, height), interpolation=cv2.INTER_NEAREST)
-    grid_fisheye = cv2.resize(grid_fisheye[:, :, :3], (width, height))
-    # grid_fisheye = np.concatenate([grid_fisheye, grid_isnan[:, :, None]], axis=2)
+    # grid_isnan = cv2.resize(raymap_fisheye[:, :, 3], (width, height), interpolation=cv2.INTER_NEAREST)
+    raymap_fisheye = cv2.resize(raymap_fisheye[:, :, :3], (width, height))
+    # raymap_fisheye = np.concatenate([raymap_fisheye, grid_isnan[:, :, None]], axis=2)
     
     # Reverse warping
     reverse_mapx = np.zeros((width, height), dtype=np.float32)
     reverse_mapy = np.zeros((width, height), dtype=np.float32)
-    # More exact reverse warping using grid_fisheye
+    # More exact reverse warping using raymap_fisheye
     for i in tqdm(range(0, width), desc="calculate_reverse_maps"):
         for j in range(0, height):
-            X_c = grid_fisheye[j, i, 0]
-            Y_c = grid_fisheye[j, i, 1]
-            Z_c = grid_fisheye[j, i, 2]
+            X_c = raymap_fisheye[j, i, 0]
+            Y_c = raymap_fisheye[j, i, 1]
+            Z_c = raymap_fisheye[j, i, 2]
             tan_theta = X_c / (Z_c + 1e-9)
             tan_phi = Y_c / (Z_c + 1e-9)
             

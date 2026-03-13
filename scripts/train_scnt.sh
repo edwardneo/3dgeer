@@ -19,7 +19,7 @@ for SCENE_ID in $SCENE_IDS; do
     TRAIN_MASK_FN="fov_${FOVMOD_TRAIN}_step_${STEP}_mask.png"
 
     # Train: Generate beap
-    python data/scnt/scnt_eq2beap.py --path "$DATASET_DIR" --dst "$BEAP_DIR_TRAIN" --step "$STEP" --fov_mod "$FOVMOD_TRAIN" --mask_dst "$TRAIN_MASK_FN"
+    python data/scnt/scnt_kb2beap.py --path "$DATASET_DIR" --dst "$BEAP_DIR_TRAIN" --step "$STEP" --fov_mod "$FOVMOD_TRAIN" --mask_dst "$TRAIN_MASK_FN"
 
     # Train: Run training script
     python train.py -s "$DATASET_DIR" -m "$OUTPUT_DIR" \
