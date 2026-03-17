@@ -57,6 +57,7 @@ This repository contains the official authors implementation associated with the
 <section class="section" id="BibTeX">
   <div class="container is-max-desktop content">
     <h2 class="title">📰BibTeX</h2>
+    <p>If you find our work useful, we’d really appreciate a ⭐ or citation.</p>
     <pre><code>@misc{huang20263dgeer3dgaussianrendering,
       title={3DGEER: 3D Gaussian Rendering Made Exact and Efficient for Generic Cameras}, 
       author={Zixun Huang and Cho-Ying Wu and Yuliang Guo and Xinyu Huang and Liu Ren},
@@ -132,8 +133,8 @@ $sibr_rg
 ```
 - To use `SIBR_remoteGaussian_app` from **checkpoints**, first run the following on Terminal 1.
 ```sh
-bash scripts/visualize.sh <SCENE_ID> <DATA_ROOT> <CKPT_DIR> <MODE>
-# Then launch:
+bash scripts/visualize.sh <SCENE_ID> <DATA_ROOT> <CKPT_DIR> <MODE: BEAP, PH or KB> # Example: 1d003b07bd/dslr data/scnt/datasets ckpt/scnt KB
+# Then (on Terminal 2) launch:
 $sibr_rg
 ```
 - **For offline visualization**, We recommend using our [`gsplat-geer`](https://github.com/boschresearch/3dgeer/tree/gsplat-geer) implementation, built on top of: https://github.com/nerfstudio-project/gsplat/blob/main/docs/3dgut.md 
