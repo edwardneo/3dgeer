@@ -281,17 +281,6 @@ __device__ bool computePBF(
     return true;
 }
 
-
-
-__forceinline__ __device__ void searchsorted_aabb(
-    const float* ref_u, int u_span,
-    const float* ref_v, int v_span,
-    const float* uv_values,
-    int* u_indices, int* v_indices) {
-    thrust::lower_bound(thrust::device, ref_u, ref_u + u_span, uv_values, uv_values + 2, u_indices);
-    thrust::lower_bound(thrust::device, ref_v, ref_v + v_span, uv_values + 2, uv_values + 4, v_indices);
-}
-
 __forceinline__ __device__ void getRect2(const int4 aabb, const int tile_size, const int tile_width, const int tile_height, uint2& rect_min, uint2& rect_max)
 {
 	rect_min = {
@@ -302,6 +291,32 @@ __forceinline__ __device__ void getRect2(const int4 aabb, const int tile_size, c
 		static_cast<unsigned int>(min(tile_width, max((int)0, (int)((aabb.y + tile_size - 1) / tile_size)))),
 		static_cast<unsigned int>(min(tile_height, max((int)0, (int)((aabb.w + tile_size - 1) / tile_size))))
 	};
+}
+
+__forceinline__ __device__ int lower_bound(const float* first, const float* last, float val) {
+    const float* it = first;
+    int count = last - first;
+    while (count > 0) {
+        int step = count / 2;
+        if (it[step] < val) {
+            it += step + 1;
+            count -= step + 1;
+        } else {
+            count = step;
+        }
+    }
+    return it - first;
+}
+
+__forceinline__ __device__ void searchsorted_pbf(
+    const float* ref_u, int u_span,
+    const float* ref_v, int v_span,
+    const float* uv_values,
+    int* u_indices, int* v_indices) {
+    u_indices[0] = lower_bound(ref_u, ref_u + u_span, uv_values[0]);
+    u_indices[1] = lower_bound(ref_u, ref_u + u_span, uv_values[1]);
+    v_indices[0] = lower_bound(ref_v, ref_v + v_span, uv_values[2]);
+    v_indices[1] = lower_bound(ref_v, ref_v + v_span, uv_values[3]);
 }
 
 __forceinline__ __device__ float2 invinterpolated_uv(
@@ -458,8 +473,8 @@ __global__ void preprocess_gaussians_kernel(
     // bool* clamped,
     // const float* colors_precomp,
     const float* viewmatrix,
-    const float* ref_tan_x, // tan_theta of mirror transformed PBF 
-    const float* ref_tan_y, // tan_phi of mirror transformed PBF 
+    const float* mirror_transformed_tan_theta, // tan_theta of mirror transformed PBF 
+    const float* mirror_transformed_tan_phi, // tan_phi of mirror transformed PBF 
     // const glm::vec3* cam_pos,
     const int W, int H,
     const float tan_fovx, float tan_fovy,
@@ -475,7 +490,7 @@ __global__ void preprocess_gaussians_kernel(
 
     // // Outputs (except xmap, ymap, h_opacity, prefiltered, and antialiasing)
     int* radii,
-    int* aabb_id,
+    int* pbf_id,
     float4* beap_xxyy,
     const float* xmap, // Set to nullptr for now until KB is reintegrated
     const float* ymap, // Set to nullptr for now until KB is reintegrated
@@ -512,10 +527,10 @@ __global__ void preprocess_gaussians_kernel(
 	// // Initialize radius and touched tiles to 0. If this isn't changed,
 	// // this Gaussian will not be processed further.
     radii[idx] = 0;
-    aabb_id[idx * 4] = 0; 
-    aabb_id[idx * 4 + 1] = 0;
-    aabb_id[idx * 4 + 2] = 0; 
-    aabb_id[idx * 4 + 3] = 0;
+    pbf_id[idx * 4] = 0; 
+    pbf_id[idx * 4 + 1] = 0;
+    pbf_id[idx * 4 + 2] = 0; 
+    pbf_id[idx * 4 + 3] = 0;
 
 	tiles_touched[idx] = 0;
 
@@ -529,6 +544,8 @@ __global__ void preprocess_gaussians_kernel(
 
 	glm::mat3 R_view = computeRotationMatrix(rotations[idx], viewmatrix);
 	float cutoff = 3.0f;
+
+	if (opacities[idx] < 1.0f / 255.0f) return;
 	// float3 p_view_identity = {means3D[3 * idx] + viewmatrix[12], means3D[3 * idx + 1] + viewmatrix[13], means3D[3 * idx + 2] + viewmatrix[14]};
 	// if (!omni_hvar(scales[idx], scale_modifier, opacities[idx], h_opacity + idx, true)) return;
 
@@ -554,9 +571,6 @@ __global__ void preprocess_gaussians_kernel(
 	// if (!computePBF(scales[idx], scale_modifier, R_view, p_view, cutoff, tan_xxyy, tan_fovx, tan_fovy, h_opacity[idx].x)) return;
 	if ((tan_xxyy.y - tan_xxyy.x) * (tan_xxyy.w - tan_xxyy.z) == 0)
 		return;
-    
-    int _aa[2];
-	int _bb[2];
 
     // _aa[0] = (int) (Ks[0] * tan_xxyy.x + K[2]);
     // _aa[1] = (int) (Ks[0] * tan_xxyy.y + K[2] + 1);
@@ -566,7 +580,7 @@ __global__ void preprocess_gaussians_kernel(
 	// if (xmap == nullptr)
 	// {
 	// 	// Convert PBF into BEAP space;
-	// 	searchsorted_aabb(ref_tan_x, W, ref_tan_y, H, (float*)(&tan_xxyy), _aa, _bb);
+	// 	searchsorted_aabb(mirror_transformed_tan_theta, W, mirror_transformed_tan_phi, H, (float*)(&tan_xxyy), _aa, _bb);
 	// } else {
     //     // TODO: Add KB map
 	// 	// // Bound PBF into KB imaging space;
@@ -584,23 +598,17 @@ __global__ void preprocess_gaussians_kernel(
 	// if ((_aabb.y - _aabb.x) * (_aabb.w - _aabb.z) == 0)
 	// 	return;
 
-    int4 my_aabb;
-    if (camera_model == CameraModelType::PINHOLE) {
-        float4 _aabb = {
-            Ks[0] * tan_xxyy.x + Ks[2],
-            Ks[0] * tan_xxyy.y + Ks[2],
-            Ks[4] * tan_xxyy.z + Ks[5],
-            Ks[4] * tan_xxyy.w + Ks[5]
-        };
-        if ((_aabb.y - _aabb.x) * (_aabb.w - _aabb.z) == 0)
-            return;
-        my_aabb = {
-			min(max((int)0, (int) (_aabb.x)), (int)(W-1)),
-			min(max((int)0, (int) (_aabb.y + 1)), (int)(W-1)),
-			min(max((int)0, (int) (_aabb.z)), (int)(H-1)),
-			min(max((int)0, (int) (_aabb.w + 1)), (int)(H-1))
-		};
-    } else if (camera_model == CameraModelType::FISHEYE) {
+	int mode; // 0: BEAP, 1: Fisheye/KB, 2: Pinhole
+	if (camera_model == CameraModelType::FISHEYE) mode = 1;
+	else if (camera_model == CameraModelType::PINHOLE) mode = 2;
+	else mode = 0;
+
+	int _aa[2], _bb[2];
+
+	if (mode == 0) { // BEAP
+		// Convert PBF into BEAP space;
+		searchsorted_pbf(mirror_transformed_tan_theta, W, mirror_transformed_tan_phi, H, (float*)(&tan_xxyy), _aa, _bb);
+	} else if (mode == 1) { // Fisheye/KB
         const float4* kb_params4 = reinterpret_cast<const float4*>(radial_coeffs);
         const float4 kb_params = kb_params4[0];
         invinterpolated_aabb(W, H, Ks[0], Ks[4], Ks[2], Ks[5], kb_params, tan_xxyy, _aa, _bb);
@@ -613,18 +621,32 @@ __global__ void preprocess_gaussians_kernel(
 		// 		_aa[0], _aa[1], _bb[0], _bb[1]
 		// 	);
 		// }
+	} else if (mode == 2) { // Pinhole
+		// searchsorted_pbf(mirror_transformed_tan_theta, W, mirror_transformed_tan_phi, H, (float*)(&tan_xxyy), _aa, _bb);
+		float4 _aabb = {
+            Ks[0] * tan_xxyy.x + Ks[2],
+            Ks[0] * tan_xxyy.y + Ks[2],
+            Ks[4] * tan_xxyy.z + Ks[5],
+            Ks[4] * tan_xxyy.w + Ks[5]
+        };
 
-        int4 _aabb = {_aa[0], _aa[1], _bb[0], _bb[1]};
-        if ((_aabb.y - _aabb.x) * (_aabb.w - _aabb.z) == 0)
-            return;
-        my_aabb = _aabb;
-    }
+		_aa[0] = min(max(0, (int) (_aabb.x)), W);
+		_aa[1] = min(max(0, (int) (_aabb.y + 1)), W);
+		_bb[0] = min(max(0, (int) (_aabb.z)), H);
+		_bb[1] = min(max(0, (int) (_aabb.w + 1)), H);
+	} else {
+		printf("Error: Mode does not exist.");
+	}
+
+	int4 _pbf = {_aa[0], _aa[1], _bb[0], _bb[1]};
+	if ((_pbf.y - _pbf.x) * (_pbf.w - _pbf.z) == 0)
+		return;
 
 	// int4 my_aabb = {(int) (_aabb.x), (int) (_aabb.y + 1), (int) (_aabb.z), (int) (_aabb.w + 1)};
 	// float2 point_image = { (my_aabb.y + my_aabb.x)/2.f, (my_aabb.w + my_aabb.z)/2.f };
 
 	uint2 rect_min, rect_max;
-	getRect2(my_aabb, tile_size, tile_width, tile_height, rect_min, rect_max);
+	getRect2(_pbf, tile_size, tile_width, tile_height, rect_min, rect_max);
 	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
 		return;
 	int my_radius = max(rect_max.x - rect_min.x, rect_max.y - rect_min.y);
@@ -643,10 +665,10 @@ __global__ void preprocess_gaussians_kernel(
 	depths[idx] = sqrtf((p_view.z * p_view.z) + (p_view.x * p_view.x) + (p_view.y * p_view.y));
 	radii[idx] = my_radius;
 	
-	aabb_id[idx * 4] = my_aabb.x;
-	aabb_id[idx * 4 + 1] = my_aabb.y;
-	aabb_id[idx * 4 + 2] = my_aabb.z;
-	aabb_id[idx * 4 + 3] = my_aabb.w;
+	pbf_id[idx * 4] = _pbf.x;
+	pbf_id[idx * 4 + 1] = _pbf.y;
+	pbf_id[idx * 4 + 2] = _pbf.z;
+	pbf_id[idx * 4 + 3] = _pbf.w;
 
 	beap_xxyy[idx] = tan_xxyy;
 
@@ -656,7 +678,7 @@ __global__ void preprocess_gaussians_kernel(
 	} else {
 		// tiles_touched[idx] = duplicateToTilesTouched(
 		// 	p_view, w2o + 3*idx, h_opacity[idx].y,
-		// 	my_aabb, tan_xxyy, grid,
+		// 	_pbf, tan_xxyy, grid,
 		// 	W, H,
 		// 	0, 0, 0, nullptr, nullptr,
 		// 	xmap,
@@ -708,8 +730,8 @@ void preprocess_gaussians(
 	// bool* clamped,
 	// const float* colors_precomp,
 	const float* viewmatrix,
-	const float* ref_tan_x,
-	const float* ref_tan_y, 
+	const float* mirror_transformed_tan_theta,
+	const float* mirror_transformed_tan_phi, 
 	// const glm::vec3* cam_pos,
 	const int W, int H,
 	const float tan_fovx, float tan_fovy,
@@ -752,7 +774,7 @@ void preprocess_gaussians(
 		// clamped,
 		// colors_precomp,
 		viewmatrix, 
-		ref_tan_x, ref_tan_y,
+		mirror_transformed_tan_theta, mirror_transformed_tan_phi,
 		// cam_pos,
 		W, H,
 		tan_fovx, tan_fovy,

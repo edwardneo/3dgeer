@@ -29,7 +29,7 @@ from .distributed import (
     all_to_all_int32,
     all_to_all_tensor_list,
 )
-from .geer.camera import omni_tan
+from .geer.camera import get_camera_tanfov
 import numpy as np
 from.debug import *
 from datetime import datetime
@@ -746,42 +746,41 @@ def rasterization(
         pass
     
     # TODO: GEER implementation
-    assert packed == False, "Packed is True, remove later"
-    # Identify intersecting tiles
     tile_width = math.ceil(width / float(tile_size))
     tile_height = math.ceil(height / float(tile_size))
-    omni_tan_theta, omni_tan_phi, tanfovx, tanfovy = omni_tan(Ks, width, height, camera_model, step=0.002)
-    isect_geer_output = isect_tiles_geer(
-        means=means,
-        quats=quats,
-        scales=scales,
-        opacities=opacities,
-        viewmats=viewmats,
-        camera_model=camera_model,
-        Ks=Ks,
-        radial_coeffs=radial_coeffs,
-        near_plane=near_plane,
-        far_plane=far_plane,
-
-        omni_tan_theta=omni_tan_theta,
-        omni_tan_phi=omni_tan_phi,
-        image_width=width,
-        image_height=height,
-        tanfovx=tanfovx,
-        tanfovy=tanfovy,
-
-        tile_size=tile_size,
-        tile_width=tile_width,
-        tile_height=tile_height,
-
-        segmented=segmented,
-        packed=packed,
-        n_images=I,
-        image_ids=image_ids,
-        gaussian_ids=gaussian_ids
-    )
     if with_geer:
-        tiles_per_gauss, isect_ids, flatten_ids, beap_xxyy = isect_geer_output
+        assert packed == False, "Packed is True, remove later"
+        # Identify intersecting tiles
+        tanfovx, tanfovy, mirror_transformed_tan_theta, mirror_transformed_tan_phi = get_camera_tanfov(camera_model, Ks, width, height)
+        tiles_per_gauss, isect_ids, flatten_ids, beap_xxyy = isect_tiles_geer(
+            means=means,
+            quats=quats,
+            scales=scales,
+            opacities=opacities,
+            viewmats=viewmats,
+            camera_model=camera_model,
+            Ks=Ks,
+            radial_coeffs=radial_coeffs,
+            near_plane=near_plane,
+            far_plane=far_plane,
+
+            mirror_transformed_tan_theta=mirror_transformed_tan_theta,
+            mirror_transformed_tan_phi=mirror_transformed_tan_phi,
+            image_width=width,
+            image_height=height,
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+
+            tile_size=tile_size,
+            tile_width=tile_width,
+            tile_height=tile_height,
+
+            segmented=segmented,
+            packed=packed,
+            n_images=I,
+            image_ids=image_ids,
+            gaussian_ids=gaussian_ids
+        )
     else:
         tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(
             means2d,
@@ -797,7 +796,6 @@ def rasterization(
             gaussian_ids=gaussian_ids
         )
         beap_xxyy = None
-        # _, _, _, beap_xxyy = isect_geer_output
     
     # print(np.allclose(isect_ids.cpu().numpy(), unsorted_isect_ids.cpu().numpy()))
     

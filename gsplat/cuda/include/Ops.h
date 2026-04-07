@@ -218,8 +218,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> intersect_tile_geer(
     const float near_plane,
 	const float far_plane,
 
-    const at::Tensor ref_tan_x, // tan_theta of mirror transformed PBF
-    const at::Tensor ref_tan_y, // tan_phi of mirror transformed PBF
+    const at::optional<at::Tensor> mirror_transformed_tan_theta, // tan_theta of mirror transformed PBF
+    const at::optional<at::Tensor> mirror_transformed_tan_phi, // tan_phi of mirror transformed PBF
     const int W, // length of tan_theta
     const int H, // length of tan_phi
     const float tan_fovx, float tan_fovy, // tan of fovx and fovy

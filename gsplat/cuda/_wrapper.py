@@ -532,8 +532,8 @@ def isect_tiles_geer(
     near_plane: float,
 	far_plane: float,
 
-    omni_tan_theta: Tensor,  # [X1] width bin length
-    omni_tan_phi: Tensor,  # [X2] height bin length
+    mirror_transformed_tan_theta: Optional[Tensor],  # [X1] width bin length
+    mirror_transformed_tan_phi: Optional[Tensor],  # [X2] height bin length
     image_width: int,
     image_height: int,
     tanfovx: float,
@@ -615,15 +615,15 @@ def isect_tiles_geer(
     assert scales.shape == image_dims + (N, 3), scales.shape
     assert viewmats.shape == image_dims + (I, 4, 4), viewmats.shape
 
-    assert omni_tan_theta.ndim == 1, omni_tan_theta.ndim
-    assert omni_tan_phi.ndim == 1, omni_tan_phi.ndim
+    assert mirror_transformed_tan_theta is None or mirror_transformed_tan_theta.ndim == 1, mirror_transformed_tan_theta.ndim
+    assert mirror_transformed_tan_phi is None or mirror_transformed_tan_phi.ndim == 1, mirror_transformed_tan_phi.ndim
 
     assert means.dtype == torch.float32, means.dtype
     assert quats.dtype == torch.float32, quats.dtype
     assert scales.dtype == torch.float32, scales.dtype
     assert viewmats.dtype == torch.float32, viewmats.dtype
-    assert omni_tan_theta.dtype == torch.float32, omni_tan_theta.dtype
-    assert omni_tan_phi.dtype == torch.float32, omni_tan_phi.dtype
+    assert mirror_transformed_tan_theta is None or mirror_transformed_tan_theta.dtype == torch.float32, mirror_transformed_tan_theta.dtype
+    assert mirror_transformed_tan_phi is None or mirror_transformed_tan_phi.dtype == torch.float32, mirror_transformed_tan_phi.dtype
 
     # Temporary for one camera
     assert I == 1, I
@@ -660,8 +660,8 @@ def isect_tiles_geer(
         near_plane,
         far_plane,
 
-        omni_tan_theta.contiguous(),
-        omni_tan_phi.contiguous(),
+        mirror_transformed_tan_theta.contiguous() if mirror_transformed_tan_theta is not None else mirror_transformed_tan_theta,
+        mirror_transformed_tan_phi.contiguous() if mirror_transformed_tan_phi is not None else mirror_transformed_tan_phi,
         image_width,
         image_height,
         tanfovx,

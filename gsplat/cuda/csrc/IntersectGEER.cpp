@@ -31,8 +31,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> intersect_tile_geer(
     const float near_plane,
 	const float far_plane,
 
-    const at::Tensor ref_tan_x, // tan_theta of mirror transformed PBF
-    const at::Tensor ref_tan_y, // tan_phi of mirror transformed PBF
+    const at::optional<at::Tensor> mirror_transformed_tan_theta, // tan_theta of mirror transformed PBF
+    const at::optional<at::Tensor> mirror_transformed_tan_phi, // tan_phi of mirror transformed PBF
     const int W,
     const int H,
     const float tan_fovx, float tan_fovy, // tan of fovx and fovy
@@ -84,7 +84,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> intersect_tile_geer(
     // for all gaussians convert AABBs into BEAP/KB space
 
     at::Tensor radii = at::empty({P}, opt.dtype(at::kInt));
-    at::Tensor aabb_id = at::empty({P*4}, opt.dtype(at::kInt));
+    at::Tensor pbf_id = at::empty({P*4}, opt.dtype(at::kInt));
     at::Tensor beap_xxyy = at::empty({P*4}, opt.dtype(at::kFloat));
     at::Tensor means3D_view = at::empty({P*3}, opt.dtype(at::kFloat));
     at::Tensor depths = at::empty({P}, opt.dtype(at::kFloat));
@@ -104,8 +104,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> intersect_tile_geer(
         // bool* clamped,
         // const float* colors_precomp,
         viewmats0.contiguous().data_ptr<float>(), // const float* viewmatrix,
-        ref_tan_x.contiguous().data_ptr<float>(), // const float* ref_tan_x, // tan_theta of mirror transformed PBF 
-        ref_tan_y.contiguous().data_ptr<float>(), // const float* ref_tan_y, // tan_phi of mirror transformed PBF 
+        mirror_transformed_tan_theta.has_value() ? mirror_transformed_tan_theta.value().contiguous().data_ptr<float>() : nullptr, // const float* mirror_transformed_tan_theta, // tan_theta of mirror transformed PBF 
+        mirror_transformed_tan_phi.has_value() ? mirror_transformed_tan_phi.value().contiguous().data_ptr<float>() : nullptr, // const float* mirror_transformed_tan_phi, // tan_phi of mirror transformed PBF 
         // const glm::vec3* cam_pos,
         W, H, // const int W, int H,
         tan_fovx, tan_fovy, // const float tan_fovx, float tan_fovy,
@@ -118,7 +118,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> intersect_tile_geer(
 
         // Outputs (except xmap, ymap, h_opacity, prefiltered, and antialiasing)
         radii.contiguous().data_ptr<int>(), // int* radii,
-        aabb_id.contiguous().data_ptr<int>(), // int* aabb_id,
+        pbf_id.contiguous().data_ptr<int>(), // int* pbf_id,
         (float4*) beap_xxyy.contiguous().data_ptr<float>(), // float4* beap_xxyy,
         nullptr, // const float* xmap, // Set to nullptr for now until KB is reintegrated
         nullptr, // const float* ymap, // Set to nullptr for now until KB is reintegrated
@@ -134,7 +134,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> intersect_tile_geer(
     );
 
     // auto radii_cpu = radii.cpu();
-    // auto aabb_id_cpu = aabb_id.cpu();
+    // auto pbf_id_cpu = pbf_id.cpu();
     // auto beap_xxyy_cpu = beap_xxyy.cpu();
     // auto depths_cpu = depths.cpu();
     // auto tiles_touched_cpu = tiles_per_gauss.cpu();
@@ -142,7 +142,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> intersect_tile_geer(
     // auto means3D_view_cpu = means3D_view.cpu();
 
     // auto radii_ptr = radii_cpu.data_ptr<int>();
-    // auto aabb_id_ptr = aabb_id_cpu.data_ptr<int>();
+    // auto pbf_id_ptr = pbf_id_cpu.data_ptr<int>();
     // auto beap_xxyy_ptr = (float4*) beap_xxyy_cpu.data_ptr<float>();
     // auto depths_ptr = depths_cpu.data_ptr<float>();
     // auto tiles_touched_ptr = tiles_touched_cpu.data_ptr<int>();
@@ -155,7 +155,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> intersect_tile_geer(
     //     printf(
     //         "%d: depth %f, radii %d, aabb %d %d %d %d, beap %f %f %f %f, touched %d, w2o [%f %f %f] [%f %f %f] [%f %f %f], mean [%f %f %f]\n",
     //         idx, depths_ptr[idx], radii_ptr[idx],
-    //         aabb_id_ptr[idx * 4], aabb_id_ptr[idx * 4 + 1], aabb_id_ptr[idx * 4 + 2], aabb_id_ptr[idx * 4 + 3],
+    //         pbf_id_ptr[idx * 4], pbf_id_ptr[idx * 4 + 1], pbf_id_ptr[idx * 4 + 2], pbf_id_ptr[idx * 4 + 3],
     //         beap_xxyy_ptr[idx].x, beap_xxyy_ptr[idx].y, beap_xxyy_ptr[idx].z, beap_xxyy_ptr[idx].w, tiles_touched_ptr[idx],
     //         w2o_ptr[3*idx].x, w2o_ptr[3*idx].y, w2o_ptr[3*idx].z,
     //         w2o_ptr[3*idx+1].x, w2o_ptr[3*idx+1].y, w2o_ptr[3*idx+1].z,
@@ -194,8 +194,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> intersect_tile_geer(
     //     // gather the negative values
     //     auto neg_values = tiles_flat.index_select(0, neg_indices);
 
-    //     auto aabb_id_cpu = aabb_id.cpu();
-    //     auto aabb_id_ptr = aabb_id_cpu.data_ptr<int>();
+    //     auto pbf_id_cpu = pbf_id.cpu();
+    //     auto pbf_id_ptr = pbf_id_cpu.data_ptr<int>();
 
     //     auto beap_xxyy_cpu = beap_xxyy.cpu();
     //     auto beap_xxyy_ptr = (float4*) beap_xxyy_cpu.data_ptr<float>();
@@ -208,7 +208,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> intersect_tile_geer(
     //         int val = neg_values[i].item<int>();
     //         printf("idx %d: %d (%f, %f, %f, %f) -> (%d, %d, %d, %d) \n", idx, val,
     //         beap_xxyy_ptr[idx].x, beap_xxyy_ptr[idx].y, beap_xxyy_ptr[idx].z, beap_xxyy_ptr[idx].w,
-    //         aabb_id_ptr[4*idx], aabb_id_ptr[4*idx+1], aabb_id_ptr[4*idx+2], aabb_id_ptr[4*idx+3]);
+    //         pbf_id_ptr[4*idx], pbf_id_ptr[4*idx+1], pbf_id_ptr[4*idx+2], pbf_id_ptr[4*idx+3]);
     //     }
     // } else {
     //     printf("tiles_per_gauss has no negative values.\n");
@@ -243,7 +243,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> intersect_tile_geer(
         flatten_ids.data_ptr<int32_t>(),
 
 		radii.contiguous().data_ptr<int>(), // radii,
-		(int4*) aabb_id.contiguous().data_ptr<int>(), // (int4*) geomState.aabb,
+		(int4*) pbf_id.contiguous().data_ptr<int>(), // (int4*) geomState.aabb,
 		(float4*) beap_xxyy.contiguous().data_ptr<float>(), // geomState.beap_xxyy,
 		nullptr, nullptr, // xmap, ymap,
 		W, H, // width, height,
