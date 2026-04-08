@@ -1523,6 +1523,78 @@ def fully_fused_projection_with_geer(
         compensations = None
     return radii, means2d, depths, conics, compensations
 
+
+def compute_raymap(
+    Ks: Tensor,  # [..., 3, 3]
+    width: int,
+    height: int,
+    camera_model: Literal["pinhole", "ortho", "fisheye", "ftheta"] = "pinhole",
+    radial_coeffs: Optional[Tensor] = None,  # [..., 6] or [..., 4]
+    tangential_coeffs: Optional[Tensor] = None,  # [..., 2]
+    thin_prism_coeffs: Optional[Tensor] = None,  # [..., 4]
+    ftheta_coeffs: Optional[FThetaCameraDistortionParameters] = None,
+) -> Tensor:
+    """Computes a camera-space ray direction map for each pixel."""
+    batch_dims = Ks.shape[:-2]
+    assert Ks.shape == batch_dims + (3, 3), Ks.shape
+
+    def _normalize_coeffs(
+        coeffs: Optional[Tensor], coeff_dim: int
+    ) -> Optional[Tensor]:
+        if coeffs is None:
+            return None
+        if not isinstance(coeffs, Tensor):
+            coeffs = torch.as_tensor(coeffs, dtype=Ks.dtype, device=Ks.device)
+        else:
+            coeffs = coeffs.to(dtype=Ks.dtype, device=Ks.device)
+
+        if coeffs.shape == batch_dims + (coeff_dim,):
+            return coeffs.contiguous()
+        if coeffs.shape == (coeff_dim,):
+            view_shape = (1,) * len(batch_dims) + (coeff_dim,)
+            return coeffs.view(view_shape).expand(batch_dims + (coeff_dim,)).contiguous()
+
+        raise AssertionError(
+            f"Invalid coeff shape {tuple(coeffs.shape)}; expected {(batch_dims + (coeff_dim,))} or {(coeff_dim,)}"
+        )
+
+    if camera_model == "fisheye":
+        radial_coeffs = _normalize_coeffs(radial_coeffs, 4)
+        if radial_coeffs is None:
+            radial_coeffs = torch.zeros(batch_dims + (4,), dtype=Ks.dtype, device=Ks.device)
+    else:
+        radial_coeffs = _normalize_coeffs(radial_coeffs, 6)
+
+    tangential_coeffs = _normalize_coeffs(tangential_coeffs, 2)
+    thin_prism_coeffs = _normalize_coeffs(thin_prism_coeffs, 4)
+
+    if radial_coeffs is not None:
+        assert radial_coeffs.shape[:-1] == batch_dims, radial_coeffs.shape
+        expected_radial_dim = 4 if camera_model == "fisheye" else 6
+        assert radial_coeffs.shape[-1] == expected_radial_dim, radial_coeffs.shape
+    if tangential_coeffs is not None:
+        assert tangential_coeffs.shape == batch_dims + (2,), tangential_coeffs.shape
+    if thin_prism_coeffs is not None:
+        assert thin_prism_coeffs.shape == batch_dims + (4,), thin_prism_coeffs.shape
+
+    camera_model_type = _make_lazy_cuda_obj(f"CameraModelType.{camera_model.upper()}")
+    ftheta_coeffs = (
+        ftheta_coeffs.to_cpp()
+        if ftheta_coeffs is not None
+        else FThetaCameraDistortionParameters.to_cpp_default()
+    )
+
+    return _make_lazy_cuda_func("compute_raymap")(
+        Ks.contiguous(),
+        width,
+        height,
+        camera_model_type,
+        radial_coeffs,
+        tangential_coeffs,
+        thin_prism_coeffs,
+        ftheta_coeffs,
+    )
+
 class _RasterizeToPixels(torch.autograd.Function):
     """Rasterize gaussians"""
 

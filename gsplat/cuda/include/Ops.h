@@ -31,6 +31,18 @@ std::tuple<at::Tensor, at::Tensor> projection_ewa_simple_bwd(
     const at::Tensor v_covars2d // [..., C, N, 2, 2]
 );
 
+// Generate a per-pixel camera-space raymap for the requested camera model.
+at::Tensor compute_raymap(
+    const at::Tensor Ks,                      // [..., 3, 3]
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const CameraModelType camera_model,
+    const at::optional<at::Tensor> radial_coeffs,     // [..., 6] or [..., 4] optional
+    const at::optional<at::Tensor> tangential_coeffs, // [..., 2] optional
+    const at::optional<at::Tensor> thin_prism_coeffs, // [..., 4] optional
+    const FThetaCameraDistortionParameters ftheta_coeffs
+);
+
 // Fuse the following operations:
 // 1. compute covar from {quats, scales}
 // 2. transform 3D gaussians from world space to camera space

@@ -2,8 +2,7 @@ import numpy as np
 import torch
 import math
 
-from .camera_model import CameraModelParameters
-from .raymap import image_points_to_camera_rays_kb
+from ..cuda._wrapper import compute_raymap
 
 def unpack_camera_intrinsics(K, fov_mod=1): # one image
     """
@@ -114,7 +113,19 @@ def mirror_transform(m, z, xi=0.0): #1.1
     """
     return m / (1+xi*(z/(torch.abs(z)))*(1+m**2)**0.5)
 
-def get_camera_tanfov(camera_model, Ks, width, height, step=0.002, fov_mod=1, data_device="cuda"):
+def get_camera_tanfov(
+    camera_model,
+    Ks,
+    width,
+    height,
+    step=0.002,
+    fov_mod=1,
+    data_device="cuda",
+    radial_coeffs=None,
+    tangential_coeffs=None,
+    thin_prism_coeffs=None,
+    ftheta_coeffs=None,
+):
     # Ks [..., C, 3, 3]
     K = Ks.to("cpu").squeeze() # one image
 
@@ -123,30 +134,18 @@ def get_camera_tanfov(camera_model, Ks, width, height, step=0.002, fov_mod=1, da
     if camera_model == "pinhole":
         return width / (2 * focal_length[0]), height / (2 * focal_length[1]), None, None
     elif camera_model == "fisheye":
-        # get image pixel points
-        u_grid, v_grid = np.meshgrid(np.arange(width), np.arange(height))
-        grid = torch.from_numpy(np.stack([u_grid, v_grid], axis=0)).float()  # [2,H,W]
-        grid_flat = grid.reshape(2, -1)  # [2,N]
-        points = grid_flat.T  # [N,2]
-        image_points = points.float()
-
-        # get raymap
-        max_radius_pixels = compute_max_radius(np.array((width, height)).astype(np.float64), np.array(principal_point))
-        fov_angle_x = 2.0 * max_radius_pixels / focal_length[0]
-        fov_angle_y = 2.0 * max_radius_pixels / focal_length[1]
-        max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0
-
-        camera_model_parameters = CameraModelParameters(
+        raymap = compute_raymap(
+            Ks,
+            width,
+            height,
             camera_model=camera_model,
-            focal_length=focal_length,
-            principal_point=principal_point,
-            resolution=(width, height),
-            radial_coeffs=[0, 0, 0, 0], # TODO: support KB model
-            max_angle=max_angle
-        )
-        rays = image_points_to_camera_rays_kb(camera_model_parameters, image_points, newton_iterations=3, device="cpu")
+            radial_coeffs=radial_coeffs,
+            tangential_coeffs=tangential_coeffs,
+            thin_prism_coeffs=thin_prism_coeffs,
+            ftheta_coeffs=ftheta_coeffs,
+        ).squeeze() # [H,W,3] assume one image
 
-        tanfovx, tanfovy = _tanfov_from_raymap(rays)
+        tanfovx, tanfovy = _tanfov_from_raymap(raymap)
         return tanfovx, tanfovy, None, None
     
     else: # BEAP (TODO)
