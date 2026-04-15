@@ -32,6 +32,7 @@ from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_rand
 
 from gsplat import export_splats
 from gsplat.compression import PngCompression
+from gsplat.cuda._wrapper import compute_raymap
 from gsplat.distributed import cli
 from gsplat.optimizers import SelectiveAdam
 from gsplat.rendering import rasterization
@@ -67,6 +68,9 @@ class Config:
     normalize_world_space: bool = True
     # Camera model
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole"
+    # Disable dataset undistortion and train on the original (distorted) images.
+    # Useful when using UT/GEER with distortion coefficients.
+    keep_distortion: bool = False
 
     # Port for the viewer server
     port: int = 8080
@@ -123,6 +127,22 @@ class Config:
     visible_adam: bool = False
     # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
     antialiased: bool = False
+
+    # ---- Stability knobs ----
+    # Clamp rendered colors to [0, 1] for the loss computation (helps avoid NaNs in SSIM).
+    clamp_colors_for_loss: bool = True
+    # Skip optimizer update if the loss is non-finite (NaN/Inf) instead of corrupting params.
+    skip_non_finite_loss: bool = True
+    # Clip gradient norm for splat parameters. 0 disables.
+    grad_clip_norm: float = 0.0
+    # Clamp the log-scales parameter (stored as log(scale)). Use wide defaults; 0 disables.
+    scales_log_min: float = -12.0
+    scales_log_max: float = 6.0
+    # Clamp opacity logits. 0 disables.
+    opacities_logit_min: float = -12.0
+    opacities_logit_max: float = 12.0
+    # Renormalize quaternion parameters after each optimizer step.
+    renormalize_quats: bool = True
 
     # Use random background for training to discourage transparency
     random_bkgd: bool = False
@@ -338,6 +358,7 @@ class Runner:
             factor=cfg.data_factor,
             normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
+            undistort=not cfg.keep_distortion,
         )
         self.trainset = Dataset(
             self.parser,
@@ -348,6 +369,11 @@ class Runner:
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
+
+        # Precompute a fisheye valid-pixel mask (raymap.valid_flag) when possible.
+        # Pixels outside the valid domain yield zero rays from `compute_raymap()`,
+        # which can destabilize training if included in the loss.
+        self._fisheye_valid_mask_cache: Dict[Tuple, Tensor] = {}
 
         # Model
         feature_dim = 32 if cfg.app_opt else None
@@ -515,7 +541,7 @@ class Runner:
         if rasterize_mode is None:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         if camera_model is None:
-            camera_model = self.cfg.camera_model
+            camera_model = "pinhole"
         render_colors, render_alphas, info = rasterization(
             means=means,
             quats=quats,
@@ -535,7 +561,7 @@ class Runner:
             sparse_grad=self.cfg.sparse_grad,
             rasterize_mode=rasterize_mode,
             distributed=self.world_size > 1,
-            camera_model=self.cfg.camera_model,
+            camera_model=camera_model,
             with_ut=self.cfg.with_ut,
             with_geer=self.cfg.with_geer,
             with_eval3d=self.cfg.with_eval3d,
@@ -623,11 +649,43 @@ class Runner:
             )
             image_ids = data["image_id"].to(device)
             masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
+            radial_coeffs = (
+                data["radial_coeffs"].to(device)
+                if (cfg.keep_distortion and "radial_coeffs" in data)
+                else None
+            )
+            tangential_coeffs = (
+                data["tangential_coeffs"].to(device)
+                if (cfg.keep_distortion and "tangential_coeffs" in data)
+                else None
+            )
             if cfg.depth_loss:
                 points = data["points"].to(device)  # [1, M, 2]
                 depths_gt = data["depths"].to(device)  # [1, M]
 
             height, width = pixels.shape[1:3]
+
+            valid_f = None
+            if data["camera_model"] == 5 and radial_coeffs is not None: # camera_model == 5 is fisheye
+                # Cache by (W,H,K,radial) for multi-camera datasets.
+                K_key = tuple(float(x) for x in data["K"].flatten().tolist())
+                radial_key = tuple(float(x) for x in radial_coeffs.flatten().tolist())
+                key = ("fisheye_valid_mask", int(width), int(height), K_key, radial_key)
+                valid_mask = self._fisheye_valid_mask_cache.get(key, None)
+                if valid_mask is None:
+                    with torch.no_grad():
+                        raymap = compute_raymap(
+                            Ks=Ks,
+                            width=int(width),
+                            height=int(height),
+                            camera_model="fisheye",
+                            radial_coeffs=radial_coeffs,
+                        )  # [1, H, W, 3]
+                        valid_mask = raymap[..., 2] > 1e-6  # [1, H, W]
+                    self._fisheye_valid_mask_cache[key] = valid_mask
+                # Zero-out invalid pixels for both prediction and target.
+                valid_f = valid_mask.unsqueeze(-1).to(dtype=pixels.dtype)  # [1,H,W,1]
+                pixels = pixels * valid_f
 
             if cfg.pose_noise:
                 camtoworlds = self.pose_perturb(camtoworlds, image_ids)
@@ -650,11 +708,17 @@ class Runner:
                 image_ids=image_ids,
                 render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                 masks=masks,
+                camera_model="fisheye" if cfg.keep_distortion and data["camera_model"] == 5 else "pinhole",
+                radial_coeffs=radial_coeffs,
+                tangential_coeffs=tangential_coeffs,
             )
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
             else:
                 colors, depths = renders, None
+
+            if valid_f is not None:
+                colors = colors * valid_f
 
             if cfg.use_bilateral_grid:
                 grid_y, grid_x = torch.meshgrid(
@@ -683,9 +747,14 @@ class Runner:
             )
 
             # loss
-            l1loss = F.l1_loss(colors, pixels)
+            colors_for_loss = (
+                colors.clamp(0.0, 1.0) if cfg.clamp_colors_for_loss else colors
+            )
+            l1loss = F.l1_loss(colors_for_loss, pixels)
             ssimloss = 1.0 - fused_ssim(
-                colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
+                colors_for_loss.permute(0, 3, 1, 2),
+                pixels.permute(0, 3, 1, 2),
+                padding="valid",
             )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
             if cfg.depth_loss:
@@ -717,7 +786,30 @@ class Runner:
             if cfg.scale_reg > 0.0:
                 loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
 
-            loss.backward()
+            do_update = True
+            if cfg.skip_non_finite_loss and (not torch.isfinite(loss).all()):
+                do_update = False
+                if world_rank == 0:
+                    print(
+                        f"Step {step}: non-finite loss detected (loss={loss.item()}). "
+                        "Skipping optimizer update."
+                    )
+            if do_update:
+                loss.backward()
+
+                # Some rendering modes (e.g. UT / eval3d) do not provide a differentiable
+                # `info["means2d"]` tensor for gradient-based refinement strategies.
+                # Cache the current means gradients before they are cleared by `zero_grad()`
+                # so strategies can still build a proxy signal.
+                if isinstance(self.cfg.strategy, DefaultStrategy):
+                    means_grad = self.splats["means"].grad
+                    if means_grad is not None:
+                        info["_strategy_means_grad"] = means_grad.detach()
+
+                if cfg.grad_clip_norm and cfg.grad_clip_norm > 0.0:
+                    torch.nn.utils.clip_grad_norm_(
+                        list(self.splats.parameters()), max_norm=cfg.grad_clip_norm
+                    )
 
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
             if cfg.depth_loss:
@@ -843,45 +935,68 @@ class Runner:
                     visibility_mask = (info["radii"] > 0).all(-1).any(0)
 
             # optimize
-            for optimizer in self.optimizers.values():
-                if cfg.visible_adam:
-                    optimizer.step(visibility_mask)
-                else:
+            if do_update:
+                for optimizer in self.optimizers.values():
+                    if cfg.visible_adam:
+                        optimizer.step(visibility_mask)
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+            else:
+                for optimizer in self.optimizers.values():
+                    optimizer.zero_grad(set_to_none=True)
+            for optimizer in self.pose_optimizers:
+                if do_update:
                     optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.pose_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
             for optimizer in self.app_optimizers:
-                optimizer.step()
+                if do_update:
+                    optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             for optimizer in self.bil_grid_optimizers:
-                optimizer.step()
+                if do_update:
+                    optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            for scheduler in schedulers:
-                scheduler.step()
+            if do_update:
+                for scheduler in schedulers:
+                    scheduler.step()
+
+                # Post-step parameter clamps for numerical stability.
+                if cfg.scales_log_max > cfg.scales_log_min:
+                    self.splats["scales"].data.clamp_(
+                        min=cfg.scales_log_min, max=cfg.scales_log_max
+                    )
+                if cfg.opacities_logit_max > cfg.opacities_logit_min:
+                    self.splats["opacities"].data.clamp_(
+                        min=cfg.opacities_logit_min, max=cfg.opacities_logit_max
+                    )
+                if cfg.renormalize_quats:
+                    self.splats["quats"].data = F.normalize(
+                        self.splats["quats"].data, dim=-1, eps=1e-12
+                    )
 
             # Run post-backward steps after backward and optimizer
-            if isinstance(self.cfg.strategy, DefaultStrategy):
-                self.cfg.strategy.step_post_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                    packed=cfg.packed,
-                )
-            elif isinstance(self.cfg.strategy, MCMCStrategy):
-                self.cfg.strategy.step_post_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                    lr=schedulers[0].get_last_lr()[0],
-                )
-            else:
-                assert_never(self.cfg.strategy)
+            if do_update:
+                if isinstance(self.cfg.strategy, DefaultStrategy):
+                    self.cfg.strategy.step_post_backward(
+                        params=self.splats,
+                        optimizers=self.optimizers,
+                        state=self.strategy_state,
+                        step=step,
+                        info=info,
+                        packed=cfg.packed,
+                    )
+                elif isinstance(self.cfg.strategy, MCMCStrategy):
+                    self.cfg.strategy.step_post_backward(
+                        params=self.splats,
+                        optimizers=self.optimizers,
+                        state=self.strategy_state,
+                        step=step,
+                        info=info,
+                        lr=schedulers[0].get_last_lr()[0],
+                    )
+                else:
+                    assert_never(self.cfg.strategy)
 
             # eval the full set
             if step in [i - 1 for i in cfg.eval_steps]:
@@ -924,6 +1039,16 @@ class Runner:
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
             masks = data["mask"].to(device) if "mask" in data else None
+            radial_coeffs = (
+                data["radial_coeffs"].to(device)
+                if (cfg.keep_distortion and "radial_coeffs" in data)
+                else None
+            )
+            tangential_coeffs = (
+                data["tangential_coeffs"].to(device)
+                if (cfg.keep_distortion and "tangential_coeffs" in data)
+                else None
+            )
             height, width = pixels.shape[1:3]
 
             torch.cuda.synchronize()
@@ -937,6 +1062,9 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 masks=masks,
+                camera_model="fisheye" if cfg.keep_distortion and data["camera_model"] == 5 else "pinhole",
+                radial_coeffs=radial_coeffs,
+                tangential_coeffs=tangential_coeffs,
             )  # [1, H, W, 3]
             torch.cuda.synchronize()
             ellipse_time += max(time.time() - tic, 1e-10)
@@ -1102,6 +1230,7 @@ class Runner:
         K = camera_state.get_K((width, height))
         c2w = torch.from_numpy(c2w).float().to(self.device)
         K = torch.from_numpy(K).float().to(self.device)
+        camera_model = render_tab_state.camera_model
 
         RENDER_MODE_MAP = {
             "rgb": "RGB",
@@ -1124,7 +1253,7 @@ class Runner:
             / 255.0,
             render_mode=RENDER_MODE_MAP[render_tab_state.render_mode],
             rasterize_mode=render_tab_state.rasterize_mode,
-            camera_model=render_tab_state.camera_model,
+            camera_model=camera_model
         )  # [1, H, W, 3]
         render_tab_state.total_gs_count = len(self.splats["means"])
         render_tab_state.rendered_gs_count = (info["radii"] > 0).all(-1).sum().item()

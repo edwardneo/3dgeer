@@ -5,50 +5,86 @@
 `gsplat-geer` is an extension of the open-source [`gsplat`](https://github.com/nerfstudio-project/gsplat) library from [Nerfstudio](https://docs.nerf.studio/) for 3DGEER-based rasterization.
 
 ## 📷`gsplat` Rasterization
-This repo extends the [`rasterization()`](https://docs.gsplat.studio/main/apis/rasterization.html#gsplat.rasterization) function provided by `gsplat` to rasterize 3D Gaussians to image planes. The argument `with_geer: bool = False` rasterizes Gaussians using the 3DGEER's PBF algorithm when set to True. For users using this function, note:
+This repo extends the [`rasterization()`](https://docs.gsplat.studio/versions/1.5.3/apis/rasterization.html) function provided by `gsplat` to rasterize 3D Gaussians to image planes. The argument `with_geer: bool = False` rasterizes Gaussians using the 3DGEER's PBF algorithm when set to True. For users using this function, note:
 
 - `with_geer=True` only works with `with_eval3d=True`.
 - `with_geer` only renders one image plane at a time.
-- To train/render pinhole camera with distortion, setting the distortion parameters to `radial_coeffs`, `tangential_coeffs`, `thin_prism_coeffs`.
+- Training is most stable with the default strategy.
+- To train/render pinhole camera with distortion, set the distortion parameters to `radial_coeffs`, `tangential_coeffs`, `thin_prism_coeffs`.
 - To train/render fisheye camera with distortion, 
-setting the distortion parameters to `radial_coeffs` and set `camera_model="fisheye"`.
+set the distortion parameters to `radial_coeffs` and set `camera_model="fisheye"`.
 
 These are consistent with `gsplat`'s 3DGUT implementation (`with_ut`).
 
 ## 🧩TODO
-- [ ] Fix the CUDA issues in `gsplat-geer` extension
 - [ ] Enable the interactive viewer for DriveStudio
 - [ ] Demo adding CAD models into distorted camera-rendered scenes
 
 ## 🏃Quick Start
 ### Training
-Passing in `--with_geer --with_ut` to the `simple_trainer.py` arg list will enable training with 3DGEER. Note in `gsplat-geer`, only MCMC densification is supported for 3DGEER training.
-
-#### Install Dependencies
+Passing in `--with_geer --with_eval3d` to the `simple_trainer.py` arg list will enable training with 3DGEER.
+#### Download Data
+Put COLMAP formatted data in `examples/data`. As an example, the command below installs Mip-NeRF 360 benchmark data.
+```bash
+cd examples
+python datasets/download_dataset.py
 ```
-pip install -r examples/requirements.txt
+#### Install Dependencies
+```bash
+pip install -r requirements.txt
 ```
 #### Training Script
+```bash
+CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
+  --data_dir path/to/data \
+  --result_dir path/to/results \
+  --with_geer \
+  --with_eval3d \
+  <OTHER ARGS>
 ```
-python examples/simple_trainer.py mcmc --with_geer --with_eval3d ... <OTHER ARGS>
+For example, to train on the Mip-NeRF 360 garden data, run the following command.
+```bash
+CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
+  --data_dir data/360_v2/garden/ \
+  --data_factor=4 \
+  --result_dir ./results/garden_geer \
+  --with_geer \
+  --with_eval3d \
+  --strategy.max_gaussians 1000000 \
+  --strategy.max_grow_per_refine 50000
 ```
+#### Caveats
+Some caveats about training with our script:
+- Default densification is more stable for 3DGEER training. It may be necessary to set the `max_gaussians` and `max_grow_per_refine` (e.g. `--strategy.max_gaussians 1000000 --strategy.max_grow_per_refine 50000`).
+- To train on fisheye data, use the flag `--keep_distortion` to avoid undistortion during data parsing.
 
 ### Rendering
 Once trained, you can view the 3DGS through the nerfstudio-style viewer to export videos. Play around with the fisheye setting and the FOV!
 
 #### Install Dependencies
-```
-pip install -r examples/requirements.txt
+```bash
+cd examples
+pip install -r requirements.txt
 ```
 #### Rendering Script
+```bash
+CUDA_VISIBLE_DEVICES=0 python simple_viewer.py \
+  --with_geer \
+  --with_eval3d \
+  --ckpt path/to/ckpt
 ```
-CUDA_VISIBLE_DEVICES=0 python simple_viewer.py --with_geer --with_eval3d --ckpt results/benchmark_mcmc_1M_3dgut/garden/ckpt_29999_rank0.pt 
+For example, to render the Mip-NeRF 360 garden checkpoint trained by the previous command, run the following command.
+```bash
+CUDA_VISIBLE_DEVICES=0 python simple_viewer.py \
+  --with_geer \
+  --with_eval3d \
+  --ckpt results/garden_geer/ckpts/ckpt_29999_rank0.pt
 ```
 
 ## ✨Opensource Community 
 ### `drivestudio-geer` 
 > Our version TBD. To use `gsplat-geer` in `drivestudio`, update `drivestudio` to be compatible with `gsplat==1.5.3` and then follow the steps [here](app/).
-### `stormGaussian-geer` 
+### `stormGaussian-geer`
 > TBD
 ### How to use in your project
 > See [./app](app/) for details.
