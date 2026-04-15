@@ -1,7 +1,8 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
+import warnings
 from typing_extensions import Literal
 
 from .base import Strategy
@@ -104,10 +105,106 @@ class DefaultStrategy(Strategy):
         # - grad2d: running accum of the norm of the image plane gradients for each GS.
         # - count: running accum of how many time each GS is visible.
         # - radii: the radii of the GSs (normalized by the image resolution).
-        state = {"grad2d": None, "count": None, "scene_scale": scene_scale}
+        state = {
+            "grad2d": None,
+            "count": None,
+            "scene_scale": scene_scale,
+            "_warned_no_grad_key_for_gradient": False,
+            "_warned_missing_grad_key_for_gradient": False,
+        }
         if self.refine_scale2d_stop_iter > 0:
             state["radii"] = None
         return state
+
+    def _maybe_initialize_running_stats(
+        self,
+        params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
+        state: Dict[str, Any],
+    ) -> None:
+        """Ensure the running stats tensors exist on the correct device.
+
+        This is normally done in `_update_state()`, but some rendering modes (e.g. UT /
+        eval3d) do not produce a differentiable tensor for `key_for_gradient`, in which
+        case `_update_state()` will early-return and we still want the strategy to be
+        a no-op instead of crashing later when refinement triggers.
+        """
+        # Use a stable reference parameter for sizing/device.
+        try:
+            ref_param = params["means"]
+        except Exception:
+            ref_param = next(iter(params.values()))
+        n_gaussian = len(ref_param)
+        device = ref_param.device
+
+        if state.get("grad2d", None) is None:
+            state["grad2d"] = torch.zeros(n_gaussian, device=device)
+        if state.get("count", None) is None:
+            state["count"] = torch.zeros(n_gaussian, device=device)
+        if self.refine_scale2d_stop_iter > 0 and state.get("radii", None) is None:
+            state["radii"] = torch.zeros(n_gaussian, device=device)
+
+    def _fallback_image_plane_grads_from_means_grad(
+        self,
+        params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
+        info: Dict[str, Any],
+        packed: bool,
+    ) -> Optional[torch.Tensor]:
+        """Approximate per-Gaussian image-plane grads from `params["means"].grad`.
+
+        This is used when `info[self.key_for_gradient]` is not differentiable or its
+        `.grad` is unavailable (common with `with_ut=True` and/or `with_eval3d=True`).
+
+        Limitations:
+        - Only supports non-packed mode.
+        - Assumes `info["depths"]` stores camera-space depth (Z).
+        - Uses a pinhole-style approximation even for distorted camera models.
+        """
+        if packed:
+            return None
+        if "viewmats" not in info or "Ks" not in info or "depths" not in info:
+            return None
+        try:
+            means_param = params["means"]
+        except Exception:
+            return None
+        means_grad = info.get("_strategy_means_grad", None)
+        if means_grad is None:
+            means_grad = means_param.grad
+        if means_grad is None or means_grad.ndim != 2 or means_grad.shape[-1] != 3:
+            return None
+
+        viewmats = info["viewmats"]
+        Ks = info["Ks"]
+        depths = info["depths"]
+        if viewmats.ndim != 3 or Ks.ndim != 3:
+            return None
+        if viewmats.shape[-2:] != (4, 4) or Ks.shape[-2:] != (3, 3):
+            return None
+
+        # depths: [C, N] or [C, N, 1] (some backends may keep a trailing dim)
+        if depths.ndim == 3 and depths.shape[-1] == 1:
+            depths = depths.squeeze(-1)
+        if depths.ndim != 2:
+            return None
+
+        # Transform world-space mean gradients into camera space: dL/dXc = R * dL/dXw
+        R = viewmats[:, :3, :3]  # [C, 3, 3]
+        if R.shape[0] != Ks.shape[0] or R.shape[0] != depths.shape[0]:
+            return None
+        if depths.shape[1] != means_grad.shape[0]:
+            return None
+
+        g_cam = torch.einsum("cij,nj->cni", R, means_grad)  # [C, N, 3]
+
+        fx = Ks[:, 0, 0].clamp_min(1e-6).unsqueeze(-1)  # [C, 1]
+        fy = Ks[:, 1, 1].clamp_min(1e-6).unsqueeze(-1)  # [C, 1]
+        Z = depths  # [C, N]
+
+        # From x = fx * X/Z + cx, y = fy * Y/Z + cy:
+        # dL/dx = (dL/dX) * (Z/fx), dL/dy = (dL/dY) * (Z/fy)
+        dL_dx = g_cam[..., 0] * Z / fx  # [C, N]
+        dL_dy = g_cam[..., 1] * Z / fy  # [C, N]
+        return torch.stack([dL_dx, dL_dy], dim=-1)  # [C, N, 2]
 
     def check_sanity(
         self,
@@ -147,7 +244,25 @@ class DefaultStrategy(Strategy):
         assert (
             self.key_for_gradient in info
         ), "The 2D means of the Gaussians is required but missing."
-        info[self.key_for_gradient].retain_grad()
+        key_tensor = info[self.key_for_gradient]
+        if not getattr(key_tensor, "requires_grad", False):
+            # Some projection / rendering modes intentionally return non-differentiable
+            # metadata tensors (e.g. UT projection). In that case, densification based
+            # on `key_for_gradient` cannot run; we keep training running and make the
+            # strategy a no-op instead of crashing.
+            if not state.get("_warned_no_grad_key_for_gradient", False):
+                warnings.warn(
+                    f"DefaultStrategy: info['{self.key_for_gradient}'] has "
+                    "requires_grad=False, so 2D-gradient-based refinement "
+                    "(duplicate/split) will be disabled. This can happen when the "
+                    "renderer/projection returns non-differentiable meta tensors "
+                    "(e.g. `with_ut=True` or `with_eval3d=True`).",
+                    category=UserWarning,
+                    stacklevel=2,
+                )
+                state["_warned_no_grad_key_for_gradient"] = True
+            return
+        key_tensor.retain_grad()
 
     def step_post_backward(
         self,
@@ -162,7 +277,17 @@ class DefaultStrategy(Strategy):
         if step >= self.refine_stop_iter:
             return
 
-        self._update_state(params, state, info, packed=packed)
+        self._maybe_initialize_running_stats(params, state)
+        updated = self._update_state(params, state, info, packed=packed)
+        if not updated and not state.get("_warned_missing_grad_key_for_gradient", False):
+            warnings.warn(
+                f"DefaultStrategy: gradient for info['{self.key_for_gradient}'] was "
+                "not available after backward, so 2D-gradient-based refinement "
+                "(duplicate/split) will be disabled.",
+                category=UserWarning,
+                stacklevel=2,
+            )
+            state["_warned_missing_grad_key_for_gradient"] = True
 
         if (
             step > self.refine_start_iter
@@ -206,7 +331,7 @@ class DefaultStrategy(Strategy):
         state: Dict[str, Any],
         info: Dict[str, Any],
         packed: bool = False,
-    ):
+    ) -> bool:
         for key in [
             "width",
             "height",
@@ -217,11 +342,20 @@ class DefaultStrategy(Strategy):
         ]:
             assert key in info, f"{key} is required but missing."
 
-        # normalize grads to [-1, 1] screen space
+        key_tensor = info[self.key_for_gradient]
         if self.absgrad:
-            grads = info[self.key_for_gradient].absgrad.clone()
+            grads_src = getattr(key_tensor, "absgrad", None)
         else:
-            grads = info[self.key_for_gradient].grad.clone()
+            grads_src = getattr(key_tensor, "grad", None)
+        if grads_src is None:
+            grads_src = self._fallback_image_plane_grads_from_means_grad(
+                params=params, info=info, packed=packed
+            )
+        if grads_src is None:
+            return False
+
+        # normalize grads to [-1, 1] screen space
+        grads = grads_src.clone()
         grads[..., 0] *= info["width"] / 2.0 * info["n_cameras"]
         grads[..., 1] *= info["height"] / 2.0 * info["n_cameras"]
 
@@ -258,6 +392,7 @@ class DefaultStrategy(Strategy):
                 # normalize radii to [0, 1] screen space
                 radii / float(max(info["width"], info["height"])),
             )
+        return True
 
     @torch.no_grad()
     def _grow_gs(

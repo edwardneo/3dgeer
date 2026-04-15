@@ -767,6 +767,15 @@ class Runner:
 
             loss.backward()
 
+            # Some rendering modes (e.g. UT / eval3d) do not provide a differentiable
+            # `info["means2d"]` tensor for gradient-based refinement strategies.
+            # Cache the current means gradients before they are cleared by `zero_grad()`
+            # so strategies can still build a proxy signal.
+            if isinstance(self.cfg.strategy, DefaultStrategy):
+                means_grad = self.splats["means"].grad
+                if means_grad is not None:
+                    info["_strategy_means_grad"] = means_grad.detach()
+
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
             if cfg.depth_loss:
                 desc += f"depth loss={depthloss.item():.6f}| "

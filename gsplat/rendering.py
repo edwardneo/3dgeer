@@ -576,6 +576,12 @@ def rasterization(
             "opacities": opacities,
         }
     )
+    # Some modes (e.g. UT / eval3d) may not produce a differentiable `meta["means2d"]`
+    # tensor, but downstream components (e.g. strategies) can still use camera params
+    # for gradient proxies or logging.
+    if with_ut or with_geer or with_eval3d:
+        meta["viewmats"] = viewmats
+        meta["Ks"] = Ks
 
     # Turn colors into [..., C, N, D] or [..., nnz, D] to pass into rasterize_to_pixels()
     if sh_degree is None:
