@@ -619,6 +619,10 @@ def rasterization(
                 B,
                 C,
             )  # [nnz, 3]
+            # Computing gradients w.r.t. view directions is typically unnecessary for
+            # 3DGS training (SH is meant to be view-dependent appearance, not geometry).
+            # Detach to significantly reduce backward memory usage.
+            dirs = dirs.detach()
 
             masks = (radii > 0).all(dim=-1)  # [nnz]
             if colors.dim() == num_batch_dims + 3:
@@ -632,6 +636,8 @@ def rasterization(
             colors = spherical_harmonics(sh_degree, dirs, shs, masks=masks)  # [nnz, 3]
         else:
             dirs = means[..., None, :, :] - campos[..., None, :]  # [..., C, N, 3]
+            # See packed path comment above.
+            dirs = dirs.detach()
             masks = (radii > 0).all(dim=-1)  # [..., C, N]
             if colors.dim() == num_batch_dims + 3:
                 # Turn [..., N, K, 3] into [..., C, N, K, 3]

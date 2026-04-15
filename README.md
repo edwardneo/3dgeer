@@ -22,27 +22,63 @@ These are consistent with `gsplat`'s 3DGUT implementation (`with_ut`).
 
 ## 🏃Quick Start
 ### Training
-Passing in `--with_geer --with_eval3d` to the `simple_trainer.py` arg list will enable training with 3DGEER. Note in `gsplat-geer`, default densification is most stable for 3DGEER training.
-
-#### Install Dependencies
+Passing in `--with_geer --with_eval3d` to the `simple_trainer.py` arg list will enable training with 3DGEER.
+#### Download Data
+Put COLMAP formatted data in `examples/data`. As an example, the command below installs Mip-NeRF 360 benchmark data.
+```bash
+cd examples
+python datasets/download_dataset.py
 ```
-pip install -r examples/requirements.txt
+#### Install Dependencies
+```bash
+pip install -r requirements.txt
 ```
 #### Training Script
+```bash
+CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
+  --data_dir path/to/data \
+  --result_dir path/to/results \
+  --with_geer \
+  --with_eval3d \
+  <OTHER ARGS>
 ```
-python examples/simple_trainer.py default --with_geer --with_eval3d ... <OTHER ARGS>
+For example, to train on the Mip-NeRF 360 garden data, run the following command.
+```bash
+CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default \
+  --data_dir data/360_v2/garden/ \
+  --data_factor=4 \
+  --result_dir ./results/garden_geer \
+  --with_geer \
+  --with_eval3d \
+  --strategy.max_gaussians 1000000 \
+  --strategy.max_grow_per_refine 50000
 ```
+#### Caveats
+Some caveats about training with our script:
+- Default densification is more stable for 3DGEER training. It may be necessary to set the `max_gaussians` and `max_grow_per_refine` (e.g. `--strategy.max_gaussians 1000000 --strategy.max_grow_per_refine 50000`).
+- To train on fisheye data, use the flag `--keep_distortion` to avoid undistortion during data parsing.
 
 ### Rendering
 Once trained, you can view the 3DGS through the nerfstudio-style viewer to export videos. Play around with the fisheye setting and the FOV!
 
 #### Install Dependencies
-```
-pip install -r examples/requirements.txt
+```bash
+cd examples
+pip install -r requirements.txt
 ```
 #### Rendering Script
+```bash
+CUDA_VISIBLE_DEVICES=0 python simple_viewer.py \
+  --with_geer \
+  --with_eval3d \
+  --ckpt path/to/ckpt
 ```
-CUDA_VISIBLE_DEVICES=0 python simple_viewer.py --with_geer --with_eval3d --ckpt results/benchmark_mcmc_1M_3dgut/garden/ckpt_29999_rank0.pt 
+For example, to render the Mip-NeRF 360 garden checkpoint trained by the previous command, run the following command.
+```bash
+CUDA_VISIBLE_DEVICES=0 python simple_viewer.py \
+  --with_geer \
+  --with_eval3d \
+  --ckpt results/garden_geer/ckpts/ckpt_29999_rank0.pt
 ```
 
 ## ✨Opensource Community 

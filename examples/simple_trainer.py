@@ -128,6 +128,22 @@ class Config:
     # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
     antialiased: bool = False
 
+    # ---- Stability knobs ----
+    # Clamp rendered colors to [0, 1] for the loss computation (helps avoid NaNs in SSIM).
+    clamp_colors_for_loss: bool = True
+    # Skip optimizer update if the loss is non-finite (NaN/Inf) instead of corrupting params.
+    skip_non_finite_loss: bool = True
+    # Clip gradient norm for splat parameters. 0 disables.
+    grad_clip_norm: float = 0.0
+    # Clamp the log-scales parameter (stored as log(scale)). Use wide defaults; 0 disables.
+    scales_log_min: float = -12.0
+    scales_log_max: float = 6.0
+    # Clamp opacity logits. 0 disables.
+    opacities_logit_min: float = -12.0
+    opacities_logit_max: float = 12.0
+    # Renormalize quaternion parameters after each optimizer step.
+    renormalize_quats: bool = True
+
     # Use random background for training to discourage transparency
     random_bkgd: bool = False
 
@@ -731,9 +747,14 @@ class Runner:
             )
 
             # loss
-            l1loss = F.l1_loss(colors, pixels)
+            colors_for_loss = (
+                colors.clamp(0.0, 1.0) if cfg.clamp_colors_for_loss else colors
+            )
+            l1loss = F.l1_loss(colors_for_loss, pixels)
             ssimloss = 1.0 - fused_ssim(
-                colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
+                colors_for_loss.permute(0, 3, 1, 2),
+                pixels.permute(0, 3, 1, 2),
+                padding="valid",
             )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
             if cfg.depth_loss:
@@ -765,16 +786,30 @@ class Runner:
             if cfg.scale_reg > 0.0:
                 loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
 
-            loss.backward()
+            do_update = True
+            if cfg.skip_non_finite_loss and (not torch.isfinite(loss).all()):
+                do_update = False
+                if world_rank == 0:
+                    print(
+                        f"Step {step}: non-finite loss detected (loss={loss.item()}). "
+                        "Skipping optimizer update."
+                    )
+            if do_update:
+                loss.backward()
 
-            # Some rendering modes (e.g. UT / eval3d) do not provide a differentiable
-            # `info["means2d"]` tensor for gradient-based refinement strategies.
-            # Cache the current means gradients before they are cleared by `zero_grad()`
-            # so strategies can still build a proxy signal.
-            if isinstance(self.cfg.strategy, DefaultStrategy):
-                means_grad = self.splats["means"].grad
-                if means_grad is not None:
-                    info["_strategy_means_grad"] = means_grad.detach()
+                # Some rendering modes (e.g. UT / eval3d) do not provide a differentiable
+                # `info["means2d"]` tensor for gradient-based refinement strategies.
+                # Cache the current means gradients before they are cleared by `zero_grad()`
+                # so strategies can still build a proxy signal.
+                if isinstance(self.cfg.strategy, DefaultStrategy):
+                    means_grad = self.splats["means"].grad
+                    if means_grad is not None:
+                        info["_strategy_means_grad"] = means_grad.detach()
+
+                if cfg.grad_clip_norm and cfg.grad_clip_norm > 0.0:
+                    torch.nn.utils.clip_grad_norm_(
+                        list(self.splats.parameters()), max_norm=cfg.grad_clip_norm
+                    )
 
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
             if cfg.depth_loss:
@@ -900,45 +935,68 @@ class Runner:
                     visibility_mask = (info["radii"] > 0).all(-1).any(0)
 
             # optimize
-            for optimizer in self.optimizers.values():
-                if cfg.visible_adam:
-                    optimizer.step(visibility_mask)
-                else:
+            if do_update:
+                for optimizer in self.optimizers.values():
+                    if cfg.visible_adam:
+                        optimizer.step(visibility_mask)
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+            else:
+                for optimizer in self.optimizers.values():
+                    optimizer.zero_grad(set_to_none=True)
+            for optimizer in self.pose_optimizers:
+                if do_update:
                     optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.pose_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
             for optimizer in self.app_optimizers:
-                optimizer.step()
+                if do_update:
+                    optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             for optimizer in self.bil_grid_optimizers:
-                optimizer.step()
+                if do_update:
+                    optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            for scheduler in schedulers:
-                scheduler.step()
+            if do_update:
+                for scheduler in schedulers:
+                    scheduler.step()
+
+                # Post-step parameter clamps for numerical stability.
+                if cfg.scales_log_max > cfg.scales_log_min:
+                    self.splats["scales"].data.clamp_(
+                        min=cfg.scales_log_min, max=cfg.scales_log_max
+                    )
+                if cfg.opacities_logit_max > cfg.opacities_logit_min:
+                    self.splats["opacities"].data.clamp_(
+                        min=cfg.opacities_logit_min, max=cfg.opacities_logit_max
+                    )
+                if cfg.renormalize_quats:
+                    self.splats["quats"].data = F.normalize(
+                        self.splats["quats"].data, dim=-1, eps=1e-12
+                    )
 
             # Run post-backward steps after backward and optimizer
-            if isinstance(self.cfg.strategy, DefaultStrategy):
-                self.cfg.strategy.step_post_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                    packed=cfg.packed,
-                )
-            elif isinstance(self.cfg.strategy, MCMCStrategy):
-                self.cfg.strategy.step_post_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                    lr=schedulers[0].get_last_lr()[0],
-                )
-            else:
-                assert_never(self.cfg.strategy)
+            if do_update:
+                if isinstance(self.cfg.strategy, DefaultStrategy):
+                    self.cfg.strategy.step_post_backward(
+                        params=self.splats,
+                        optimizers=self.optimizers,
+                        state=self.strategy_state,
+                        step=step,
+                        info=info,
+                        packed=cfg.packed,
+                    )
+                elif isinstance(self.cfg.strategy, MCMCStrategy):
+                    self.cfg.strategy.step_post_backward(
+                        params=self.splats,
+                        optimizers=self.optimizers,
+                        state=self.strategy_state,
+                        step=step,
+                        info=info,
+                        lr=schedulers[0].get_last_lr()[0],
+                    )
+                else:
+                    assert_never(self.cfg.strategy)
 
             # eval the full set
             if step in [i - 1 for i in cfg.eval_steps]:
@@ -1004,6 +1062,7 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 masks=masks,
+                camera_model="fisheye" if cfg.keep_distortion and data["camera_model"] == 5 else "pinhole",
                 radial_coeffs=radial_coeffs,
                 tangential_coeffs=tangential_coeffs,
             )  # [1, H, W, 3]

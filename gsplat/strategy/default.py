@@ -93,6 +93,10 @@ class DefaultStrategy(Strategy):
     revised_opacity: bool = False
     verbose: bool = False
     key_for_gradient: Literal["means2d", "gradient_2dgs"] = "means2d"
+    # Safety knobs to prevent unbounded GS growth (helps avoid OOM).
+    # 0 means "no limit".
+    max_gaussians: int = 0
+    max_grow_per_refine: int = 0
 
     def initialize_state(self, scene_scale: float = 1.0) -> Dict[str, Any]:
         """Initialize and return the running state for this strategy.
@@ -111,6 +115,7 @@ class DefaultStrategy(Strategy):
             "scene_scale": scene_scale,
             "_warned_no_grad_key_for_gradient": False,
             "_warned_missing_grad_key_for_gradient": False,
+            "_warned_growth_clipped": False,
         }
         if self.refine_scale2d_stop_iter > 0:
             state["radii"] = None
@@ -412,13 +417,58 @@ class DefaultStrategy(Strategy):
             <= self.grow_scale3d * state["scene_scale"]
         )
         is_dupli = is_grad_high & is_small
-        n_dupli = is_dupli.sum().item()
 
         is_large = ~is_small
         is_split = is_grad_high & is_large
         if step < self.refine_scale2d_stop_iter:
             is_split |= state["radii"] > self.grow_scale2d
+        n_dupli = is_dupli.sum().item()
         n_split = is_split.sum().item()
+
+        # Clip growth to avoid unbounded explosions in #Gaussians (which can lead to OOM).
+        max_new = None
+        if self.max_gaussians > 0:
+            max_new = max(0, int(self.max_gaussians) - int(len(params["means"])))
+        if self.max_grow_per_refine > 0:
+            max_new = (
+                int(self.max_grow_per_refine)
+                if max_new is None
+                else min(max_new, int(self.max_grow_per_refine))
+            )
+        if max_new is not None:
+            if max_new <= 0:
+                return 0, 0
+            n_new = n_dupli + n_split
+            if n_new > max_new:
+                # Select the top-k candidates by gradient magnitude.
+                cand_dupli = torch.where(is_dupli)[0]
+                cand_split = torch.where(is_split)[0]
+                cand_ids = torch.cat([cand_dupli, cand_split], dim=0)
+                if len(cand_ids) > 0:
+                    scores = grads[cand_ids]
+                    k = min(int(max_new), int(scores.numel()))
+                    topk = torch.topk(scores, k=k, sorted=False).indices
+                    sel_ids = cand_ids[topk]
+                    selected = torch.zeros_like(is_grad_high, dtype=torch.bool)
+                    selected[sel_ids] = True
+                    is_dupli = is_dupli & selected
+                    is_split = is_split & selected
+                    n_dupli = is_dupli.sum().item()
+                    n_split = is_split.sum().item()
+                else:
+                    is_dupli = torch.zeros_like(is_grad_high, dtype=torch.bool)
+                    is_split = torch.zeros_like(is_grad_high, dtype=torch.bool)
+                    n_dupli, n_split = 0, 0
+
+                if not state.get("_warned_growth_clipped", False):
+                    warnings.warn(
+                        "DefaultStrategy: clipped densification (duplicate/split) to "
+                        f"{max_new} new Gaussians this refine step to avoid OOM. "
+                        "Tune with `max_gaussians` / `max_grow_per_refine`.",
+                        category=UserWarning,
+                        stacklevel=2,
+                    )
+                    state["_warned_growth_clipped"] = True
 
         # first duplicate
         if n_dupli > 0:
