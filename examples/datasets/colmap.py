@@ -62,11 +62,13 @@ class Parser:
         factor: int = 1,
         normalize: bool = False,
         test_every: int = 8,
+        undistort: bool = True,
     ):
         self.data_dir = data_dir
         self.factor = factor
         self.normalize = normalize
         self.test_every = test_every
+        self.undistort = undistort
 
         colmap_dir = os.path.join(data_dir, "sparse/0/")
         if not os.path.exists(colmap_dir):
@@ -84,6 +86,7 @@ class Parser:
         imdata = manager.images
         w2c_mats = []
         camera_ids = []
+        camera_models_dict = dict()
         Ks_dict = dict()
         params_dict = dict()
         imsize_dict = dict()  # width, height
@@ -111,25 +114,24 @@ class Parser:
             type_ = cam.camera_type
             if type_ == 0 or type_ == "SIMPLE_PINHOLE":
                 params = np.empty(0, dtype=np.float32)
-                camtype = "perspective"
+                camera_models_dict[camera_id] = 0
             elif type_ == 1 or type_ == "PINHOLE":
                 params = np.empty(0, dtype=np.float32)
-                camtype = "perspective"
-            if type_ == 2 or type_ == "SIMPLE_RADIAL":
+                camera_models_dict[camera_id] = 1
+            elif type_ == 2 or type_ == "SIMPLE_RADIAL":
                 params = np.array([cam.k1, 0.0, 0.0, 0.0], dtype=np.float32)
-                camtype = "perspective"
+                camera_models_dict[camera_id] = 2
             elif type_ == 3 or type_ == "RADIAL":
                 params = np.array([cam.k1, cam.k2, 0.0, 0.0], dtype=np.float32)
-                camtype = "perspective"
+                camera_models_dict[camera_id] = 3
             elif type_ == 4 or type_ == "OPENCV":
                 params = np.array([cam.k1, cam.k2, cam.p1, cam.p2], dtype=np.float32)
-                camtype = "perspective"
+                camera_models_dict[camera_id] = 4
             elif type_ == 5 or type_ == "OPENCV_FISHEYE":
                 params = np.array([cam.k1, cam.k2, cam.k3, cam.k4], dtype=np.float32)
-                camtype = "fisheye"
-            assert (
-                camtype == "perspective" or camtype == "fisheye"
-            ), f"Only perspective and fisheye cameras are supported, got {type_}"
+                camera_models_dict[camera_id] = 5
+            else:
+                raise ValueError(f"Unsupported camera type: {type_}")
 
             params_dict[camera_id] = params
             imsize_dict[camera_id] = (cam.width // factor, cam.height // factor)
@@ -196,7 +198,38 @@ class Parser:
             )
             image_files = sorted(_get_rel_paths(image_dir))
         colmap_to_image = dict(zip(colmap_files, image_files))
-        image_paths = [os.path.join(image_dir, colmap_to_image[f]) for f in image_names]
+
+        # Skip images referenced by COLMAP but missing on disk.
+        kept_image_names = []
+        kept_image_paths = []
+        kept_camera_ids = []
+        kept_camtoworlds = []
+        skipped = []
+
+        for name, camera_id, c2w in zip(image_names, camera_ids, camtoworlds):
+            rel_path = name if name in image_files else colmap_to_image.get(name, None)
+            if rel_path is None or rel_path not in image_files:
+                skipped.append(name)
+                continue
+            kept_image_names.append(name)
+            kept_image_paths.append(os.path.join(image_dir, rel_path))
+            kept_camera_ids.append(camera_id)
+            kept_camtoworlds.append(c2w)
+
+        if skipped:
+            print(
+                f"Warning: skipped {len(skipped)} COLMAP images not found on disk "
+                f"(e.g. {skipped[:5]})."
+            )
+        if len(kept_image_names) == 0:
+            raise ValueError(
+                f"No COLMAP images could be mapped to files in {image_dir!r}."
+            )
+
+        image_names = kept_image_names
+        image_paths = kept_image_paths
+        camera_ids = kept_camera_ids
+        camtoworlds = np.stack(kept_camtoworlds, axis=0)
 
         # 3D points and {image_name -> [point_idx]}
         points = manager.points3D.astype(np.float32)
@@ -211,7 +244,7 @@ class Parser:
                 point_idx = manager.point3D_id_to_point3D_idx[point_id]
                 point_indices.setdefault(image_name, []).append(point_idx)
         point_indices = {
-            k: np.array(v).astype(np.int32) for k, v in point_indices.items()
+            k: np.array(v).astype(np.int32) for k, v in point_indices.items() if k in image_names
         }
 
         # Normalize the world space.
@@ -249,6 +282,7 @@ class Parser:
         self.image_paths = image_paths  # List[str], (num_images,)
         self.camtoworlds = camtoworlds  # np.ndarray, (num_images, 4, 4)
         self.camera_ids = camera_ids  # List[int], (num_images,)
+        self.camera_models_dict = camera_models_dict  # Dict of camera_id -> camera_model (int)
         self.Ks_dict = Ks_dict  # Dict of camera_id -> K
         self.params_dict = params_dict  # Dict of camera_id -> params
         self.imsize_dict = imsize_dict  # Dict of camera_id -> (width, height)
@@ -275,71 +309,76 @@ class Parser:
         # undistortion
         self.mapx_dict = dict()
         self.mapy_dict = dict()
-        self.roi_undist_dict = dict()
+        self.roi_dict = dict()
         for camera_id in self.params_dict.keys():
-            params = self.params_dict[camera_id]
-            if len(params) == 0:
-                continue  # no distortion
-            assert camera_id in self.Ks_dict, f"Missing K for camera {camera_id}"
-            assert (
-                camera_id in self.params_dict
-            ), f"Missing params for camera {camera_id}"
-            K = self.Ks_dict[camera_id]
-            width, height = self.imsize_dict[camera_id]
+            if self.undistort:
+                camtype = "perspective" if self.camera_models_dict[camera_id] != 5 else "fisheye"
+                params = self.params_dict[camera_id]
+                if len(params) == 0:
+                    continue  # no distortion
+                assert camera_id in self.Ks_dict, f"Missing K for camera {camera_id}"
+                assert (
+                    camera_id in self.params_dict
+                ), f"Missing params for camera {camera_id}"
+                K = self.Ks_dict[camera_id]
+                width, height = self.imsize_dict[camera_id]
 
-            if camtype == "perspective":
-                K_undist, roi_undist = cv2.getOptimalNewCameraMatrix(
-                    K, params, (width, height), 0
-                )
-                mapx, mapy = cv2.initUndistortRectifyMap(
-                    K, params, None, K_undist, (width, height), cv2.CV_32FC1
-                )
-                mask = None
-            elif camtype == "fisheye":
-                fx = K[0, 0]
-                fy = K[1, 1]
-                cx = K[0, 2]
-                cy = K[1, 2]
-                grid_x, grid_y = np.meshgrid(
-                    np.arange(width, dtype=np.float32),
-                    np.arange(height, dtype=np.float32),
-                    indexing="xy",
-                )
-                x1 = (grid_x - cx) / fx
-                y1 = (grid_y - cy) / fy
-                theta = np.sqrt(x1**2 + y1**2)
-                r = (
-                    1.0
-                    + params[0] * theta**2
-                    + params[1] * theta**4
-                    + params[2] * theta**6
-                    + params[3] * theta**8
-                )
-                mapx = (fx * x1 * r + width // 2).astype(np.float32)
-                mapy = (fy * y1 * r + height // 2).astype(np.float32)
+                if camtype == "perspective":
+                    K_undist, roi_undist = cv2.getOptimalNewCameraMatrix(
+                        K, params, (width, height), 0
+                    )
+                    mapx, mapy = cv2.initUndistortRectifyMap(
+                        K, params, None, K_undist, (width, height), cv2.CV_32FC1
+                    )
+                    mask = None
+                elif camtype == "fisheye":
+                    D = params.astype(np.float64).reshape(4, 1)
+                    R = np.eye(3, dtype=np.float64)
+                    K_undist = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+                        K.astype(np.float64), D, (width, height), R, balance=0.0
+                    )
+                    mapx, mapy = cv2.fisheye.initUndistortRectifyMap(
+                        K.astype(np.float64),
+                        D,
+                        R,
+                        K_undist.astype(np.float64),
+                        (width, height),
+                        cv2.CV_32FC1,
+                    )
 
-                # Use mask to define ROI
-                mask = np.logical_and(
-                    np.logical_and(mapx > 0, mapy > 0),
-                    np.logical_and(mapx < width - 1, mapy < height - 1),
-                )
-                y_indices, x_indices = np.nonzero(mask)
-                y_min, y_max = y_indices.min(), y_indices.max() + 1
-                x_min, x_max = x_indices.min(), x_indices.max() + 1
-                mask = mask[y_min:y_max, x_min:x_max]
-                K_undist = K.copy()
-                K_undist[0, 2] -= x_min
-                K_undist[1, 2] -= y_min
-                roi_undist = [x_min, y_min, x_max - x_min, y_max - y_min]
+                    valid = (
+                        np.isfinite(mapx)
+                        & np.isfinite(mapy)
+                        & (mapx >= 0)
+                        & (mapx <= float(width - 1))
+                        & (mapy >= 0)
+                        & (mapy <= float(height - 1))
+                    )
+                    ys, xs = np.where(valid)
+                    if xs.size == 0:
+                        roi_undist = [0, 0, width, height]
+                        mask = None
+                    else:
+                        x_min, y_min = int(xs.min()), int(ys.min())
+                        x_max, y_max = int(xs.max()) + 1, int(ys.max()) + 1
+                        mapx = mapx[y_min:y_max, x_min:x_max]
+                        mapy = mapy[y_min:y_max, x_min:x_max]
+                        mask = valid[y_min:y_max, x_min:x_max]
+                        K_undist = K_undist.copy()
+                        K_undist[0, 2] -= float(x_min)
+                        K_undist[1, 2] -= float(y_min)
+                        roi_undist = [x_min, y_min, x_max - x_min, y_max - y_min]
+                else:
+                    assert_never(camtype)
+
+                self.mapx_dict[camera_id] = mapx
+                self.mapy_dict[camera_id] = mapy
+                self.Ks_dict[camera_id] = K_undist
+                self.roi_dict[camera_id] = roi_undist
+                self.imsize_dict[camera_id] = (roi_undist[2], roi_undist[3])
+                self.mask_dict[camera_id] = mask
             else:
-                assert_never(camtype)
-
-            self.mapx_dict[camera_id] = mapx
-            self.mapy_dict[camera_id] = mapy
-            self.Ks_dict[camera_id] = K_undist
-            self.roi_undist_dict[camera_id] = roi_undist
-            self.imsize_dict[camera_id] = (roi_undist[2], roi_undist[3])
-            self.mask_dict[camera_id] = mask
+                self.roi_dict[camera_id] = [0, 0, *self.imsize_dict[camera_id]]
 
         # size of the scene measured by cameras
         camera_locations = camtoworlds[:, :3, 3]
@@ -380,14 +419,14 @@ class Dataset:
         camtoworlds = self.parser.camtoworlds[index]
         mask = self.parser.mask_dict[camera_id]
 
-        if len(params) > 0:
+        if self.parser.undistort and len(params) > 0:
             # Images are distorted. Undistort them.
             mapx, mapy = (
                 self.parser.mapx_dict[camera_id],
                 self.parser.mapy_dict[camera_id],
             )
             image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
-            x, y, w, h = self.parser.roi_undist_dict[camera_id]
+            x, y, w, h = self.parser.roi_dict[camera_id]
             image = image[y : y + h, x : x + w]
 
         if self.patch_size is not None:
@@ -400,6 +439,7 @@ class Dataset:
             K[1, 2] -= y
 
         data = {
+            "camera_model": self.parser.camera_models_dict[camera_id],
             "K": torch.from_numpy(K).float(),
             "camtoworld": torch.from_numpy(camtoworlds).float(),
             "image": torch.from_numpy(image).float(),
@@ -407,6 +447,24 @@ class Dataset:
         }
         if mask is not None:
             data["mask"] = torch.from_numpy(mask).bool()
+
+        if not self.parser.undistort:
+            # Provide distortion coefficients for renderers that support it.
+            if self.parser.camera_models_dict[camera_id] == 5:  # fisheye
+                data["radial_coeffs"] = torch.from_numpy(params.copy()).float()
+            else:
+                k1, k2, p1, p2 = (
+                    float(params[0]) if len(params) > 0 else 0.0,
+                    float(params[1]) if len(params) > 1 else 0.0,
+                    float(params[2]) if len(params) > 2 else 0.0,
+                    float(params[3]) if len(params) > 3 else 0.0,
+                )
+                data["radial_coeffs"] = torch.tensor(
+                    [k1, k2, 0.0, 0.0, 0.0, 0.0], dtype=torch.float32
+                )
+                data["tangential_coeffs"] = torch.tensor(
+                    [p1, p2], dtype=torch.float32
+                )
 
         if self.load_depths:
             # projected points to image plane to get depths

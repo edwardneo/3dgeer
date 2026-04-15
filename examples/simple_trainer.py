@@ -32,6 +32,7 @@ from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_rand
 
 from gsplat import export_splats
 from gsplat.compression import PngCompression
+from gsplat.cuda._wrapper import compute_raymap
 from gsplat.distributed import cli
 from gsplat.optimizers import SelectiveAdam
 from gsplat.rendering import rasterization
@@ -67,6 +68,9 @@ class Config:
     normalize_world_space: bool = True
     # Camera model
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole"
+    # Disable dataset undistortion and train on the original (distorted) images.
+    # Useful when using UT/GEER with distortion coefficients.
+    keep_distortion: bool = False
 
     # Port for the viewer server
     port: int = 8080
@@ -338,6 +342,7 @@ class Runner:
             factor=cfg.data_factor,
             normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
+            undistort=not cfg.keep_distortion,
         )
         self.trainset = Dataset(
             self.parser,
@@ -348,6 +353,11 @@ class Runner:
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
+
+        # Precompute a fisheye valid-pixel mask (raymap.valid_flag) when possible.
+        # Pixels outside the valid domain yield zero rays from `compute_raymap()`,
+        # which can destabilize training if included in the loss.
+        self._fisheye_valid_mask_cache: Dict[Tuple, Tensor] = {}
 
         # Model
         feature_dim = 32 if cfg.app_opt else None
@@ -515,7 +525,7 @@ class Runner:
         if rasterize_mode is None:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         if camera_model is None:
-            camera_model = self.cfg.camera_model
+            camera_model = "pinhole"
         render_colors, render_alphas, info = rasterization(
             means=means,
             quats=quats,
@@ -535,7 +545,7 @@ class Runner:
             sparse_grad=self.cfg.sparse_grad,
             rasterize_mode=rasterize_mode,
             distributed=self.world_size > 1,
-            camera_model=self.cfg.camera_model,
+            camera_model=camera_model,
             with_ut=self.cfg.with_ut,
             with_geer=self.cfg.with_geer,
             with_eval3d=self.cfg.with_eval3d,
@@ -623,11 +633,43 @@ class Runner:
             )
             image_ids = data["image_id"].to(device)
             masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
+            radial_coeffs = (
+                data["radial_coeffs"].to(device)
+                if (cfg.keep_distortion and "radial_coeffs" in data)
+                else None
+            )
+            tangential_coeffs = (
+                data["tangential_coeffs"].to(device)
+                if (cfg.keep_distortion and "tangential_coeffs" in data)
+                else None
+            )
             if cfg.depth_loss:
                 points = data["points"].to(device)  # [1, M, 2]
                 depths_gt = data["depths"].to(device)  # [1, M]
 
             height, width = pixels.shape[1:3]
+
+            valid_f = None
+            if data["camera_model"] == 5 and radial_coeffs is not None: # camera_model == 5 is fisheye
+                # Cache by (W,H,K,radial) for multi-camera datasets.
+                K_key = tuple(float(x) for x in data["K"].flatten().tolist())
+                radial_key = tuple(float(x) for x in radial_coeffs.flatten().tolist())
+                key = ("fisheye_valid_mask", int(width), int(height), K_key, radial_key)
+                valid_mask = self._fisheye_valid_mask_cache.get(key, None)
+                if valid_mask is None:
+                    with torch.no_grad():
+                        raymap = compute_raymap(
+                            Ks=Ks,
+                            width=int(width),
+                            height=int(height),
+                            camera_model="fisheye",
+                            radial_coeffs=radial_coeffs,
+                        )  # [1, H, W, 3]
+                        valid_mask = raymap[..., 2] > 1e-6  # [1, H, W]
+                    self._fisheye_valid_mask_cache[key] = valid_mask
+                # Zero-out invalid pixels for both prediction and target.
+                valid_f = valid_mask.unsqueeze(-1).to(dtype=pixels.dtype)  # [1,H,W,1]
+                pixels = pixels * valid_f
 
             if cfg.pose_noise:
                 camtoworlds = self.pose_perturb(camtoworlds, image_ids)
@@ -650,11 +692,17 @@ class Runner:
                 image_ids=image_ids,
                 render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                 masks=masks,
+                camera_model="fisheye" if cfg.keep_distortion and data["camera_model"] == 5 else "pinhole",
+                radial_coeffs=radial_coeffs,
+                tangential_coeffs=tangential_coeffs,
             )
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
             else:
                 colors, depths = renders, None
+
+            if valid_f is not None:
+                colors = colors * valid_f
 
             if cfg.use_bilateral_grid:
                 grid_y, grid_x = torch.meshgrid(
@@ -924,6 +972,16 @@ class Runner:
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
             masks = data["mask"].to(device) if "mask" in data else None
+            radial_coeffs = (
+                data["radial_coeffs"].to(device)
+                if (cfg.keep_distortion and "radial_coeffs" in data)
+                else None
+            )
+            tangential_coeffs = (
+                data["tangential_coeffs"].to(device)
+                if (cfg.keep_distortion and "tangential_coeffs" in data)
+                else None
+            )
             height, width = pixels.shape[1:3]
 
             torch.cuda.synchronize()
@@ -937,6 +995,8 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 masks=masks,
+                radial_coeffs=radial_coeffs,
+                tangential_coeffs=tangential_coeffs,
             )  # [1, H, W, 3]
             torch.cuda.synchronize()
             ellipse_time += max(time.time() - tic, 1e-10)
@@ -1102,6 +1162,7 @@ class Runner:
         K = camera_state.get_K((width, height))
         c2w = torch.from_numpy(c2w).float().to(self.device)
         K = torch.from_numpy(K).float().to(self.device)
+        camera_model = render_tab_state.camera_model
 
         RENDER_MODE_MAP = {
             "rgb": "RGB",
@@ -1124,7 +1185,7 @@ class Runner:
             / 255.0,
             render_mode=RENDER_MODE_MAP[render_tab_state.render_mode],
             rasterize_mode=render_tab_state.rasterize_mode,
-            camera_model=render_tab_state.camera_model,
+            camera_model=camera_model
         )  # [1, H, W, 3]
         render_tab_state.total_gs_count = len(self.splats["means"])
         render_tab_state.rendered_gs_count = (info["radii"] > 0).all(-1).sum().item()
