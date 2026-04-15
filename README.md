@@ -5,24 +5,24 @@
 `gsplat-geer` is an extension of the open-source [`gsplat`](https://github.com/nerfstudio-project/gsplat) library from [Nerfstudio](https://docs.nerf.studio/) for 3DGEER-based rasterization.
 
 ## 📷`gsplat` Rasterization
-This repo extends the [`rasterization()`](https://docs.gsplat.studio/main/apis/rasterization.html#gsplat.rasterization) function provided by `gsplat` to rasterize 3D Gaussians to image planes. The argument `with_geer: bool = False` rasterizes Gaussians using the 3DGEER's PBF algorithm when set to True. For users using this function, note:
+This repo extends the [`rasterization()`](https://docs.gsplat.studio/versions/1.5.3/apis/rasterization.html) function provided by `gsplat` to rasterize 3D Gaussians to image planes. The argument `with_geer: bool = False` rasterizes Gaussians using the 3DGEER's PBF algorithm when set to True. For users using this function, note:
 
 - `with_geer=True` only works with `with_eval3d=True`.
 - `with_geer` only renders one image plane at a time.
-- To train/render pinhole camera with distortion, setting the distortion parameters to `radial_coeffs`, `tangential_coeffs`, `thin_prism_coeffs`.
+- Training is most stable with the default strategy.
+- To train/render pinhole camera with distortion, set the distortion parameters to `radial_coeffs`, `tangential_coeffs`, `thin_prism_coeffs`.
 - To train/render fisheye camera with distortion, 
-setting the distortion parameters to `radial_coeffs` and set `camera_model="fisheye"`.
+set the distortion parameters to `radial_coeffs` and set `camera_model="fisheye"`.
 
 These are consistent with `gsplat`'s 3DGUT implementation (`with_ut`).
 
 ## 🧩TODO
-- [ ] Fix the CUDA issues in `gsplat-geer` extension
 - [ ] Enable the interactive viewer for DriveStudio
 - [ ] Demo adding CAD models into distorted camera-rendered scenes
 
 ## 🏃Quick Start
 ### Training
-Passing in `--with_geer --with_ut` to the `simple_trainer.py` arg list will enable training with 3DGEER. Note in `gsplat-geer`, only MCMC densification is supported for 3DGEER training.
+Passing in `--with_geer --with_eval3d` to the `simple_trainer.py` arg list will enable training with 3DGEER. Note in `gsplat-geer`, default densification is most stable for 3DGEER training.
 
 #### Install Dependencies
 ```
@@ -30,7 +30,7 @@ pip install -r examples/requirements.txt
 ```
 #### Training Script
 ```
-python examples/simple_trainer.py mcmc --with_geer --with_eval3d ... <OTHER ARGS>
+python examples/simple_trainer.py default --with_geer --with_eval3d ... <OTHER ARGS>
 ```
 
 ### Rendering
@@ -48,7 +48,7 @@ CUDA_VISIBLE_DEVICES=0 python simple_viewer.py --with_geer --with_eval3d --ckpt 
 ## ✨Opensource Community 
 ### `drivestudio-geer` 
 > Our version TBD. To use `gsplat-geer` in `drivestudio`, update `drivestudio` to be compatible with `gsplat==1.5.3` and then follow the steps [here](app/).
-### `stormGaussian-geer` 
+### `stormGaussian-geer`
 > TBD
 ### How to use in your project
 > See [./app](app/) for details.
