@@ -196,8 +196,9 @@ def render(
             if "rgb_sky" in results:
                 rgb_sky.append(get_numpy(results["rgb_sky"]))
             # ------------- depth ------------- #
-            depth = results["depth"]
-            depths.append(get_numpy(depth))
+            if "depth" in results:
+                depth = results["depth"]
+                depths.append(get_numpy(depth))
             # ------------- mask ------------- #
             if "opacity" in results:
                 opacities.append(get_numpy(results["opacity"]))
@@ -331,7 +332,8 @@ def render(
     results_dict["vehicle_psnr"] = non_zero_mean(vehicle_psnrs) if compute_metrics else -1
     results_dict["vehicle_ssim"] = non_zero_mean(vehicle_ssims) if compute_metrics else -1
     results_dict["rgbs"] = rgbs
-    results_dict["depths"] = depths
+    if len(depths) > 0:
+        results_dict["depths"] = depths
     results_dict["cam_names"] = cam_names
     results_dict["cam_ids"] = cam_ids
     if len(opacities) > 0:

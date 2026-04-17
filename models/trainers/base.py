@@ -237,10 +237,17 @@ class BasicTrainer(nn.Module):
                 from models.losses import safe_binary_cross_entropy
                 sky_opacity_loss_fn = lambda pred, gt: safe_binary_cross_entropy(pred, gt, limit=0.1, reduction="mean")
         self.sky_opacity_loss_fn = sky_opacity_loss_fn
+
+        depth_supervision = "depth" in self.losses_dict or "inverse_depth_smoothness" in self.losses_dict
+        if depth_supervision and self.render_cfg.get("render_mode", "default") != "default":
+            print("WARNING: 3DGUT/3DGEER training does not support depth. Turning off depth supervision")
+            self.use_depth_supervision = False
+        else:
+            self.use_depth_supervision = depth_supervision
         
         depth_loss_fn = None
         depth_loss_cfg = self.losses_dict.get("depth", None)
-        if depth_loss_cfg is not None:
+        if depth_loss_cfg is not None and self.use_depth_supervision:
             from models.losses import DepthLoss
             depth_loss_fn = DepthLoss(
                 loss_type=depth_loss_cfg.loss_type,
@@ -277,13 +284,19 @@ class BasicTrainer(nn.Module):
             self.tic = time.time()
         
     def postprocess_per_train_step(self, step: int) -> None:
-        radii = self.info["radii"]
-        if self.render_cfg.absgrad:
-            grads = self.info["means2d"].absgrad.clone()
+        radii = self.info["radii"].amax(dim=-1)
+        if self.render_cfg.get("render_mode", "default") == "default":
+            if self.render_cfg.absgrad:
+                grads = self.info["means2d"].absgrad.clone()
+            else:
+                grads = self.info["means2d"].grad.clone()
+            grads[..., 0] *= self.info["width"] / 2.0 * self.render_cfg.batch_size
+            grads[..., 1] *= self.info["height"] / 2.0 * self.render_cfg.batch_size
         else:
-            grads = self.info["means2d"].grad.clone()
-        grads[..., 0] *= self.info["width"] / 2.0 * self.render_cfg.batch_size
-        grads[..., 1] *= self.info["height"] / 2.0 * self.render_cfg.batch_size
+            if self.render_cfg.absgrad:
+                grads = self.info["means3d"].grad.clone().abs()[None, ...]
+            else:
+                grads = self.info["means3d"].grad.clone()[None, ...]
         
         for class_name in self.gaussian_classes.keys():
             gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
@@ -312,7 +325,7 @@ class BasicTrainer(nn.Module):
     def update_visibility_filter(self) -> None:
         for class_name in self.gaussian_classes.keys():
             gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
-            self.models[class_name].cur_radii = self.info["radii"][0, gaussian_mask]
+            self.models[class_name].cur_radii = self.info["radii"].amax(dim=-1)[0, gaussian_mask]
 
     def process_camera(
         self,
@@ -404,14 +417,21 @@ class BasicTrainer(nn.Module):
                 absgrad=self.render_cfg.absgrad,
                 sparse_grad=self.render_cfg.sparse_grad,
                 rasterize_mode="antialiased" if self.render_cfg.antialiased else "classic",
+                with_ut=self.render_cfg.get("render_mode", "default") == "ut",
+                with_geer=self.render_cfg.get("render_mode", "default") == "geer",
+                with_eval3d=self.render_cfg.get("render_mode", "default") in ["ut", "geer"],
                 **kwargs,
             )
             renders = renders[0]
             alphas = alphas[0].squeeze(-1)
             assert self.render_cfg.batch_size == 1, "batch size must be 1, will support batch size > 1 in the future"
             
-            assert renders.shape[-1] == 4, f"Must render rgb, depth and alpha"
-            rendered_rgb, rendered_depth = torch.split(renders, [3, 1], dim=-1)
+            if self.render_cfg.get("render_mode", "default") == "default":
+                assert renders.shape[-1] == 4, f"Must render rgb, depth and alpha"
+                rendered_rgb, rendered_depth = torch.split(renders, [3, 1], dim=-1)
+            else:
+                assert renders.shape[-1] == 3, f"Must render rgb and alpha"
+                rendered_rgb, rendered_depth = renders, None
             
             if not return_info:
                 return torch.clamp(rendered_rgb, max=1.0), rendered_depth, alphas[..., None]
@@ -422,12 +442,18 @@ class BasicTrainer(nn.Module):
         rgb, depth, opacity, self.info = render_fn(return_info=True)
         results = {
             "rgb_gaussians": rgb,
-            "depth": depth, 
             "opacity": opacity
         }
         
+        if depth is not None:
+            results["depth"] = depth
+        
         if self.training:
-            self.info["means2d"].retain_grad()
+            if self.render_cfg.get("render_mode", "default") == "default":
+                self.info["means2d"].retain_grad()
+            else:
+                self.info["means3d"] = gs.means
+                self.info["means3d"].retain_grad()
         
         return results, render_fn
 
@@ -483,7 +509,7 @@ class BasicTrainer(nn.Module):
             cam=processed_cam,
             near_plane=self.render_cfg.near_plane,
             far_plane=self.render_cfg.far_plane,
-            render_mode="RGB+ED",
+            render_mode="RGB+ED" if self.render_cfg.get("render_mode", "default") == "default" else "RGB",
             radius_clip=self.render_cfg.get('radius_clip', 0.)
         )
         
@@ -550,7 +576,7 @@ class BasicTrainer(nn.Module):
             loss_dict.update({"sky_loss_opacity": sky_loss_opacity})
         
         # depth loss
-        if self.depth_loss_fn is not None:
+        if self.use_depth_supervision and self.depth_loss_fn is not None:
             gt_depth = image_infos["lidar_depth_map"] 
             lidar_hit_mask = (gt_depth > 0).float() * valid_loss_mask
             pred_depth = outputs["depth"]
@@ -574,7 +600,7 @@ class BasicTrainer(nn.Module):
             
         # from pvg: https://github.com/fudan-zvg/PVG/blob/b4162a9135282e0f3c929054f16be1b3fbacd77a/train.py#L161
         inverse_depth_smoothness_reg = self.losses_dict.get("inverse_depth_smoothness", None)
-        if inverse_depth_smoothness_reg is not None:
+        if self.use_depth_supervision and inverse_depth_smoothness_reg is not None:
             inverse_depth = 1 / (outputs["depth"] + 1e-5)
             loss_inv_depth = kornia.losses.inverse_depth_smoothness_loss(
                 inverse_depth[None].repeat(1, 1, 1, 3).permute(0, 3, 1, 2),
