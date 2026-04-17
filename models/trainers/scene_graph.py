@@ -243,7 +243,7 @@ class MultiTrainer(BasicTrainer):
             cam=processed_cam,
             near_plane=self.render_cfg.near_plane,
             far_plane=self.render_cfg.far_plane,
-            render_mode="RGB+ED",
+            render_mode="RGB+ED" if self.render_cfg.get("render_mode", "default") == "default" else "RGB",
             radius_clip=self.render_cfg.get('radius_clip', 0.)
         )
         
@@ -264,7 +264,8 @@ class MultiTrainer(BasicTrainer):
                     sep_rgb, sep_depth, sep_opacity = render_fn(gaussian_mask)
                     outputs[class_name+"_rgb"] = self.affine_transformation(sep_rgb, image_infos)
                     outputs[class_name+"_opacity"] = sep_opacity
-                    outputs[class_name+"_depth"] = sep_depth
+                    if sep_depth is not None:
+                        outputs[class_name+"_depth"] = sep_depth
 
         if not self.training or self.render_dynamic_mask:
             with torch.no_grad():
@@ -272,7 +273,8 @@ class MultiTrainer(BasicTrainer):
                 sep_rgb, sep_depth, sep_opacity = render_fn(gaussian_mask)
                 outputs["Dynamic_rgb"] = self.affine_transformation(sep_rgb, image_infos)
                 outputs["Dynamic_opacity"] = sep_opacity
-                outputs["Dynamic_depth"] = sep_depth
+                if sep_depth is not None:
+                    outputs["Dynamic_depth"] = sep_depth
         
         return outputs
 

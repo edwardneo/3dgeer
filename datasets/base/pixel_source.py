@@ -111,6 +111,8 @@ class CameraData(object):
         undistort: bool = False,
         # whether to use buffer sampling
         buffer_downscale: float = 1.0,
+        # whether this camera is being loaded for the checkpoint viewer
+        viewer: bool = False,
         # the device to move the camera to
         device: torch.device = torch.device("cpu"),
     ):
@@ -133,8 +135,16 @@ class CameraData(object):
         # Load the images, dynamic masks, sky masks, etc.
         self.create_all_filelist()
         self.load_calibrations()
-        self.load_images()
+        self.images = None
+        if not viewer:
+            self.load_images()
         self.load_egocar_mask()
+
+        self.dynamic_masks = None
+        self.human_masks = None
+        self.vehicle_masks = None
+        self.sky_masks = None
+        
         if load_dynamic_mask:
             self.load_dynamic_masks()
         if load_sky_mask:
@@ -458,7 +468,8 @@ class CameraData(object):
         self.intrinsics = self.intrinsics.to(device)
         if self.distortions is not None:
             self.distortions = self.distortions.to(device)
-        self.images = self.images.to(device)
+        if self.images is not None:
+            self.images = self.images.to(device)
         if self.egocar_mask is not None:
             self.egocar_mask = self.egocar_mask.to(device)
         if self.dynamic_masks is not None:

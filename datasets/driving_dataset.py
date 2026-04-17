@@ -46,6 +46,14 @@ class DrivingDataset(SceneDataset):
         #   PandaSet: 6 Cameras
         #   NuPlan:   8 Cameras
         self.type = self.data_cfg.dataset
+        if self.data_cfg.get("viewer", False):
+            self.data_cfg.pixel_source.viewer = True
+            self.data_cfg.pixel_source.load_dynamic_mask = False
+            self.data_cfg.pixel_source.load_sky_mask = False
+            self.data_cfg.pixel_source.load_objects = False
+            self.data_cfg.pixel_source.load_smpl = False
+            self.data_cfg.pixel_source.undistort = False
+            self.data_cfg.lidar_source.load_lidar = False
         try: # For Waymo, NuScenes, ArgoVerse, PandaSet
             self.data_path = os.path.join(
                 self.data_cfg.data_root,
@@ -76,11 +84,11 @@ class DrivingDataset(SceneDataset):
 
         # ---- create data source ---- #
         self.pixel_source, self.lidar_source = self.build_data_source()
-        assert self.pixel_source is not None and self.lidar_source is not None, \
-            "Must have both pixel source and lidar source"
-        self.project_lidar_pts_on_images(
-            delete_out_of_view_points=True
-        )
+        assert self.pixel_source is not None, "Must have pixel source"
+        if self.lidar_source is not None:
+            self.project_lidar_pts_on_images(
+                delete_out_of_view_points=True
+            )
         self.aabb = self.get_aabb()
 
         # ---- define train and test indices ---- #

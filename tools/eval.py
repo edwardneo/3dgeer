@@ -13,7 +13,6 @@ from utils.misc import import_str
 from models.trainers import BasicTrainer
 from models.video_utils import (
     render_images,
-    save_videos,
     render_novel_views
 )
 
@@ -32,16 +31,37 @@ def do_evaluation(
     log_metrics: bool = True
 ):
     trainer.set_eval()
+    logger.info(
+        "Evaluation renders use trainer.render_cfg.render_mode=%s",
+        trainer.render_cfg.get("render_mode", "default"),
+    )
 
     logger.info("Evaluating Pixels...")
     if dataset.test_image_set is not None and cfg.render.render_test:
         logger.info("Evaluating Test Set Pixels...")
+        if args.render_video_postfix is None:
+            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/test_set_{step}.mp4"
+        else:
+            video_output_pth = (
+                f"{cfg.log_dir}/videos{post_fix}/test_set_{step}_{args.render_video_postfix}.mp4"
+            )
         render_results = render_images(
             trainer=trainer,
             dataset=dataset.test_image_set,
             compute_metrics=True,
             compute_error_map=cfg.render.vis_error,
+            save_video_kwargs={
+                "save_pth": video_output_pth,
+                "layout": dataset.layout,
+                "num_timestamps": dataset.num_test_timesteps,
+                "keys": render_keys,
+                "num_cams": dataset.pixel_source.num_cams,
+                "save_seperate_video": cfg.logging.save_seperate_video,
+                "fps": 2,
+                "verbose": True,
+            },
         )
+        vis_frame_dict = render_results.pop("vis_frame_dict")
         
         if log_metrics:
             eval_dict = {}
@@ -67,24 +87,6 @@ def do_evaluation(
                 json.dump(eval_dict, f)
             logger.info(f"Image evaluation metrics saved to {test_metrics_file}")
 
-        if args.render_video_postfix is None:
-            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/test_set_{step}.mp4"
-        else:
-            video_output_pth = (
-                f"{cfg.log_dir}/videos{post_fix}/test_set_{step}_{args.render_video_postfix}.mp4"
-            )
-        vis_frame_dict = save_videos(
-            render_results,
-            video_output_pth,
-            layout=dataset.layout,
-            num_timestamps=dataset.num_test_timesteps,
-            keys=render_keys,
-            num_cams=dataset.pixel_source.num_cams,
-            save_seperate_video=cfg.logging.save_seperate_video,
-            fps=2,
-            verbose=True,
-            save_images=False,
-        )
         if args.enable_wandb:
             for k, v in vis_frame_dict.items():
                 wandb.log({"image_rendering/test/" + k: wandb.Image(v)})
@@ -93,12 +95,29 @@ def do_evaluation(
         
     if cfg.render.render_full:
         logger.info("Evaluating Full Set...")
+        if args.render_video_postfix is None:
+            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/full_set_{step}.mp4"
+        else:
+            video_output_pth = (
+                f"{cfg.log_dir}/videos{post_fix}/full_set_{step}_{args.render_video_postfix}.mp4"
+            )
         render_results = render_images(
             trainer=trainer,
             dataset=dataset.full_image_set,
             compute_metrics=True,
             compute_error_map=cfg.render.vis_error,
+            save_video_kwargs={
+                "save_pth": video_output_pth,
+                "layout": dataset.layout,
+                "num_timestamps": dataset.num_img_timesteps,
+                "keys": render_keys,
+                "num_cams": dataset.pixel_source.num_cams,
+                "save_seperate_video": cfg.logging.save_seperate_video,
+                "fps": cfg.render.fps,
+                "verbose": True,
+            },
         )
+        vis_frame_dict = render_results.pop("vis_frame_dict")
         
         if log_metrics:
             eval_dict = {}
@@ -124,23 +143,6 @@ def do_evaluation(
                 json.dump(eval_dict, f)
             logger.info(f"Image evaluation metrics saved to {full_metrics_file}")
 
-        if args.render_video_postfix is None:
-            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/full_set_{step}.mp4"
-        else:
-            video_output_pth = (
-                f"{cfg.log_dir}/videos{post_fix}/full_set_{step}_{args.render_video_postfix}.mp4"
-            )
-        vis_frame_dict = save_videos(
-            render_results,
-            video_output_pth,
-            layout=dataset.layout,
-            num_timestamps=dataset.num_img_timesteps,
-            keys=render_keys,
-            num_cams=dataset.pixel_source.num_cams,
-            save_seperate_video=cfg.logging.save_seperate_video,
-            fps=cfg.render.fps,
-            verbose=True,
-        )
         if args.enable_wandb:
             for k, v in vis_frame_dict.items():
                 wandb.log({"image_rendering/full/" + k: wandb.Image(v)})
