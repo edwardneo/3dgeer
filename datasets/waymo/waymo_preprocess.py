@@ -26,6 +26,7 @@ from .waymo_utils import (
     parse_range_image_flow_and_camera_projection,
     convert_range_image_to_point_cloud_flow,
     project_vehicle_to_image,
+    camera_exposure_poses,
     get_ground_np
 )
 
@@ -341,6 +342,19 @@ class WaymoProcessor(object):
             pose,
         )
 
+        # Keep ego_pose for LiDAR/objects; export per-camera exposure poses separately.
+        scene_dir = os.path.join(self.save_dir, str(file_idx).zfill(3))
+        for folder in ('camera_pose_start', 'camera_pose', 'camera_timing'):
+            os.makedirs(os.path.join(scene_dir, folder), exist_ok=True)
+        calibrations = {camera.name: camera for camera in frame.context.camera_calibrations}
+        for image in frame.images:
+            start, end, timing = camera_exposure_poses(image, calibrations[image.name])
+            stem = f'{frame_idx:03d}_{image.name - 1}'
+            np.savetxt(os.path.join(scene_dir, 'camera_pose_start', stem + '.txt'), start)
+            np.savetxt(os.path.join(scene_dir, 'camera_pose', stem + '.txt'), end)
+            with open(os.path.join(scene_dir, 'camera_timing', stem + '.json'), 'w') as stream:
+                json.dump(timing, stream, indent=2)
+
     def save_dynamic_mask(self, frame, file_idx, frame_idx, class_valid='all'):
         assert class_valid in ['all', 'human', 'vehicle'], "Invalid class valid"
         if class_valid == 'all':
@@ -413,7 +427,7 @@ class WaymoProcessor(object):
 
                 # Project box corners from vehicle coordinates onto the image.
                 projected_corners = project_vehicle_to_image(
-                    frame.pose, calibration, corners
+                    frame.pose, calibration, corners, camera_image=img
                 )
                 u, v, ok = projected_corners.transpose()
                 ok = ok.astype(bool)

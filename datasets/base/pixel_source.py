@@ -125,8 +125,9 @@ class CameraData(object):
         self.buffer_downscale = buffer_downscale
         self.device = device
         
-        self.cam_name = DATASETS_CONFIG[dataset_name][cam_id]["camera_name"]
-        self.original_size = DATASETS_CONFIG[dataset_name][cam_id]["original_size"]
+        metadata = getattr(self, "camera_metadata", None) or DATASETS_CONFIG[dataset_name][cam_id]
+        self.cam_name = metadata["camera_name"]
+        self.original_size = metadata["original_size"]
         self.load_size = [
             int(self.original_size[0] / downscale_when_loading),
             int(self.original_size[1] / downscale_when_loading),
@@ -1078,66 +1079,121 @@ class ScenePixelSource(abc.ABC):
         """
         return self.data_cfg.sampler.buffer_downscale
     
-    def prepare_novel_view_render_data(self, dataset_type: str, traj: torch.Tensor) -> list:
-        """
-        Prepare all necessary elements for novel view rendering.
+    def prepare_novel_view_render_data(
+        self,
+        dataset_type,
+        traj,
+        camera_model=None,
+        camera_id=None,
+        height=None,
+        width=None,
+        fov=None,
+        radial_coeffs=None,
+        ftheta_parameters=None,
+        render_mode=None,
+    ):
+        """Yield virtual-camera frames without materializing a full video in memory.
 
-        Args:
-            dataset_type (str): Type of dataset
-            traj (torch.Tensor): Novel view trajectory, shape (N, 4, 4)
-
-        Returns:
-            list: List of dicts, each containing elements required for rendering a single frame:
-                - cam_infos: Camera information (extrinsics, intrinsics, image dimensions)
-                - image_infos: Image-related information (indices, normalized time, viewdirs, etc.)
+        FTheta calibration may be a JSON path or a mapping. With no override,
+        use the selected dataset camera model/calibration. Virtual cameras use
+        a global shutter; recorded-camera evaluation retains capture timing.
         """
-        if dataset_type == "argoverse":
-            cam_id = 1  # Use cam_id 1 for Argoverse dataset
-        else:
-            cam_id = 0  # Use cam_id 0 for other datasets
-        
-        intrinsics = self.camera_data[cam_id].intrinsics[0]  # Assume intrinsics are constant across frames
-        H, W = self.camera_data[cam_id].HEIGHT, self.camera_data[cam_id].WIDTH
-        
-        original_frame_count = self.num_frames
-        scaled_indices = torch.linspace(0, original_frame_count - 1, len(traj))
-        normed_time = torch.linspace(0, 1, len(traj))
-        
-        render_data = []
-        for i in range(len(traj)):
-            c2w = traj[i]
-            
-            # Generate ray origins and directions
-            x, y = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='xy')
-            x, y = x.to(self.device), y.to(self.device)
-            
-            origins, viewdirs, direction_norm = get_rays(x.flatten(), y.flatten(), c2w, intrinsics)
-            origins = origins.reshape(H, W, 3)
-            viewdirs = viewdirs.reshape(H, W, 3)
-            direction_norm = direction_norm.reshape(H, W, 1)
-            
-            cam_infos = {
-                "camera_to_world": c2w,
-                "intrinsics": intrinsics,
-                "height": torch.tensor([H], dtype=torch.long, device=self.device),
-                "width": torch.tensor([W], dtype=torch.long, device=self.device),
+        import json
+        from utils.geometry import camera_model_rays, scale_ftheta_calibration
+
+        if camera_id is None:
+            if dataset_type == 'argoverse':
+                camera_id = 1
+            else:
+                camera_id = self.camera_list[0]
+        source = self.camera_data[camera_id]
+        H, W = int(height or source.HEIGHT), int(width or source.WIDTH)
+        if H <= 0 or W <= 0:
+            raise ValueError('Virtual camera dimensions must be positive')
+        source_model = getattr(source, 'camera_model', 'pinhole')
+        model = camera_model or source_model
+        if model not in ('pinhole', 'fisheye', 'ftheta'):
+            raise ValueError('camera_model must be pinhole, fisheye or ftheta')
+        K = source.intrinsics[0].to(self.device).clone()
+        K[0] *= W / source.WIDTH
+        K[1] *= H / source.HEIGHT
+        radial = None
+        params = None
+        if model == 'ftheta':
+            params = ftheta_parameters
+            if isinstance(params, str):
+                with open(params) as stream:
+                    params = json.load(stream)
+            if params is None:
+                params = getattr(source, 'ftheta_parameters', None)
+            if params is None:
+                raise ValueError(
+                    'FTheta virtual rendering requires ftheta_parameters (JSON path or calibration mapping)'
+                )
+            if fov is not None:
+                raise ValueError('FTheta uses its calibration, not a separate fov override')
+            params = scale_ftheta_calibration(params, W, H)
+            K = torch.eye(3, device=self.device)
+            K[:2, 2] = K.new_tensor(params['principal_point']) + 0.5
+        elif model == 'fisheye':
+            radial = K.new_tensor(radial_coeffs if radial_coeffs is not None else [0.0] * 4)
+            if radial.shape != (4,) or not torch.isfinite(radial).all():
+                raise ValueError('OpenCV fisheye requires four finite radial_coeffs')
+            fov = 180.0 if fov is None else float(fov)
+            if not 0 < fov <= 180:
+                raise ValueError('OpenCV fisheye fov must be in (0, 180] degrees')
+            angle = np.radians(fov) / 2
+            radius = angle * (
+                1 + sum(float(k) * angle ** (2 * i + 2) for i, k in enumerate(radial))
+            )
+            if radius <= 0:
+                raise ValueError('Fisheye calibration produces a nonpositive image radius')
+            K[0, 0] = K[1, 1] = W / (2 * radius)
+            K[:2, 2] = K.new_tensor([W / 2, H / 2])
+        elif fov is not None or source_model != 'pinhole':
+            fov = 90.0 if fov is None else float(fov)
+            if not 0 < fov < 180:
+                raise ValueError('Pinhole fov must be in (0, 180) degrees')
+            K[0, 0] = K[1, 1] = W / (2 * np.tan(np.radians(fov) / 2))
+            K[:2, 2] = K.new_tensor([W / 2, H / 2])
+        rays, valid = camera_model_rays(H, W, K, model, radial, params)
+        y, x = torch.meshgrid(
+            torch.arange(H, device=self.device), torch.arange(W, device=self.device), indexing='ij'
+        )
+        for i, pose in enumerate(traj):
+            pose = pose.to(self.device)
+            time = i / max(len(traj) - 1, 1)
+            yield {
+                'cam_infos': {
+                    'camera_to_world': pose,
+                    'intrinsics': K,
+                    'height': H,
+                    'width': W,
+                    'camera_model': model,
+                    'radial_coeffs': radial,
+                    'ftheta_parameters': params,
+                    'render_mode': render_mode,
+                    'shutter_type': 'GLOBAL',
+                },
+                'image_infos': {
+                    'origins': pose[:3, 3].expand(H, W, 3),
+                    'viewdirs': rays @ pose[:3, :3].T,
+                    'direction_norm': torch.ones_like(rays[..., :1]),
+                    'img_idx': torch.full(
+                        (H, W),
+                        round(time * (self.num_frames - 1)) * self.num_cams
+                        + int(source.unique_cam_idx),
+                        dtype=torch.long,
+                        device=self.device,
+                    ),
+                    'frame_idx': torch.full(
+                        (H, W),
+                        round(time * (self.num_frames - 1)),
+                        dtype=torch.long,
+                        device=self.device,
+                    ),
+                    'normed_time': torch.full((H, W), time, device=self.device),
+                    'pixel_coords': torch.stack((y / H, x / W), -1),
+                    'egocar_masks': (~valid).float(),
+                },
             }
-            
-            image_infos = {
-                "origins": origins,
-                "viewdirs": viewdirs,
-                "direction_norm": direction_norm,
-                "img_idx": torch.full((H, W), i, dtype=torch.long, device=self.device),
-                "frame_idx": torch.full((H, W), scaled_indices[i].round().long(), device=self.device),
-                "normed_time": torch.full((H, W), normed_time[i], dtype=torch.float32, device=self.device),
-                "pixel_coords": torch.stack(
-                    [y.float() / H, x.float() / W], dim=-1
-                ),  # [H, W, 2]
-            }
-            
-            render_data.append({
-                "cam_infos": cam_infos,
-                "image_infos": image_infos,
-            })
-        
-        return render_data

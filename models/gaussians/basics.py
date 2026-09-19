@@ -148,6 +148,13 @@ class dataclass_camera:
     Ks: torch.Tensor
     H: int
     W: int
+    camera_model: str = "pinhole"
+    radial_coeffs: Optional[torch.Tensor] = None
+    tangential_coeffs: Optional[torch.Tensor] = None
+    ftheta_parameters: Optional[dict] = None
+    camtoworlds_end: Optional[torch.Tensor] = None
+    shutter_type: str = "GLOBAL"
+    render_mode: Optional[str] = None
 
 @dataclass
 class dataclass_gs:

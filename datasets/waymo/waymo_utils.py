@@ -14,8 +14,69 @@ import tensorflow as tf
 from waymo_open_dataset.utils import range_image_utils, transform_utils
 from waymo_open_dataset.wdl_limited.camera.ops import py_camera_model_ops
 
-def project_vehicle_to_image(vehicle_pose, calibration, points):
-    """Projects from vehicle coordinate system to image with global shutter.
+def camera_exposure_poses(image, calibration):
+    """OpenCV camera poses at the edges of the rolling readout (exposure centers).
+
+    Waymo supplies vehicle pose and world-frame linear/angular velocity at
+    pose_timestamp. Extrapolate that pose, then apply the fixed camera extrinsic.
+    See waymo_open_dataset/dataset.proto for timing and velocity definitions.
+    """
+    from scipy.spatial.transform import Rotation
+
+    directions = {
+        1: 'ROLLING_TOP_TO_BOTTOM',
+        2: 'ROLLING_LEFT_TO_RIGHT',
+        3: 'ROLLING_BOTTOM_TO_TOP',
+        4: 'ROLLING_RIGHT_TO_LEFT',
+        5: 'GLOBAL',
+    }
+    direction = directions.get(calibration.rolling_shutter_direction)
+    if direction is None:
+        raise ValueError('Waymo camera has unknown rolling-shutter direction')
+    vehicle = np.asarray(image.pose.transform, dtype=np.float64).reshape(4, 4)
+    extrinsic = np.asarray(calibration.extrinsic.transform, dtype=np.float64).reshape(4, 4)
+    opencv_to_waymo = np.array([[0, 0, 1, 0], [-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 0, 1]])
+    timestamp = float(image.pose_timestamp)
+    linear = np.array([image.velocity.v_x, image.velocity.v_y, image.velocity.v_z])
+    angular = np.array([image.velocity.w_x, image.velocity.w_y, image.velocity.w_z])
+    if direction == 'GLOBAL':
+        start_time = end_time = timestamp
+    else:
+        start_time = float(image.camera_trigger_time) + float(image.shutter) / 2
+        end_time = float(image.camera_readout_done_time) - float(image.shutter) / 2
+        if image.shutter < 0 or end_time < start_time or image.camera_trigger_time <= 0:
+            raise ValueError('Waymo camera has invalid exposure/readout timing')
+        if not image.HasField('pose_timestamp') or not image.HasField('velocity'):
+            raise ValueError('Waymo rolling-shutter camera is missing pose timing or velocity')
+    if not (
+        np.isfinite(vehicle).all()
+        and np.isfinite(extrinsic).all()
+        and np.isfinite(linear).all()
+        and np.isfinite(angular).all()
+        and np.isfinite([start_time, end_time, timestamp]).all()
+    ):
+        raise ValueError('Waymo camera has nonfinite pose/timing data')
+
+    def at_time(t):
+        dt = t - timestamp
+        pose = vehicle.copy()
+        pose[:3, :3] = Rotation.from_rotvec(angular * dt).as_matrix() @ vehicle[:3, :3]
+        pose[:3, 3] += linear * dt
+        return pose @ extrinsic @ opencv_to_waymo
+
+    timing = {
+        'shutter_type': direction,
+        'pose_timestamp': timestamp,
+        'start_timestamp': start_time,
+        'end_timestamp': end_time,
+        'resolution': [int(calibration.width), int(calibration.height)],
+        'pose_convention': 'OpenCV camera-to-world at image-edge exposure centers',
+    }
+    return at_time(start_time), at_time(end_time), timing
+
+
+def project_vehicle_to_image(vehicle_pose, calibration, points, camera_image=None):
+    """Project vehicle points, using recorded rolling shutter when supplied.
 
     Arguments:
       vehicle_pose: Vehicle pose transform from vehicle into world coordinate
@@ -34,8 +95,7 @@ def project_vehicle_to_image(vehicle_pose, calibration, points):
         cx, cy, cz, _ = np.matmul(pose_matrix, [*point, 1])
         world_points[i] = (cx, cy, cz)
 
-    # Populate camera image metadata. Velocity and latency stats are filled with
-    # zeroes.
+    # Legacy callers use a single pose; raw preprocessing supplies camera timing.
     extrinsic = tf.reshape(
         tf.constant(list(calibration.extrinsic.transform), dtype=tf.float32), [4, 4]
     )
@@ -44,11 +104,25 @@ def project_vehicle_to_image(vehicle_pose, calibration, points):
         [
             calibration.width,
             calibration.height,
-            dataset_pb2.CameraCalibration.GLOBAL_SHUTTER,
+            (
+                calibration.rolling_shutter_direction
+                if camera_image is not None
+                else dataset_pb2.CameraCalibration.GLOBAL_SHUTTER
+            ),
         ],
         dtype=tf.int32,
     )
     camera_image_metadata = list(vehicle_pose.transform) + [0.0] * 10
+    if camera_image is not None:
+        v = camera_image.velocity
+        camera_image_metadata = list(camera_image.pose.transform) + [
+            v.v_x, v.v_y, v.v_z,
+            v.w_x, v.w_y, v.w_z,
+            camera_image.pose_timestamp,
+            camera_image.shutter,
+            camera_image.camera_trigger_time,
+            camera_image.camera_readout_done_time,
+        ]
 
     # Perform projection and return projected image coordinates (u, v, ok).
     return py_camera_model_ops.world_to_image(

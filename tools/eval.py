@@ -162,7 +162,21 @@ def do_evaluation(
         
         for traj_type, traj in render_traj.items():
             # Prepare rendering data
-            render_data = dataset.prepare_novel_view_render_data(traj)
+            camera_options = {
+                key: render_novel_cfg[key]
+                for key in (
+                    "camera_model",
+                    "camera_id",
+                    "height",
+                    "width",
+                    "fov",
+                    "radial_coeffs",
+                    "ftheta_parameters",
+                    "render_mode",
+                )
+                if key in render_novel_cfg
+            }
+            render_data = dataset.prepare_novel_view_render_data(traj, **camera_options)
             
             # Render and save video
             save_path = os.path.join(video_output_dir, f"{traj_type}.mp4")
@@ -171,6 +185,46 @@ def do_evaluation(
                 fps=render_novel_cfg.get("fps", cfg.render.fps)
             )
             logger.info(f"Saved novel view video for trajectory type: {traj_type} to {save_path}")
+
+    render_ftheta_cfg = cfg.render.get("render_ftheta", None)
+    if render_ftheta_cfg is not None and render_ftheta_cfg is not False:
+        ftheta_render_mode = render_ftheta_cfg.get(
+            "render_mode", trainer.render_cfg.get("render_mode", "default")
+        )
+        if ftheta_render_mode not in ("ut", "geer"):
+            raise ValueError("FTheta rendering requires render_mode 'ut' or 'geer'")
+        if any(render_ftheta_cfg.get(key) is not None for key in ("fov", "radial_coeffs")):
+            raise ValueError("FTheta rendering uses ftheta_parameters, not fov or radial_coeffs")
+        logger.info("Rendering FTheta views with %s...", ftheta_render_mode)
+        base_traj_cfg = render_novel_cfg if render_novel_cfg is not None else {}
+        render_traj = dataset.get_novel_render_traj(
+            traj_types=render_ftheta_cfg.get(
+                "traj_types", base_traj_cfg.get("traj_types", ["front_center_interp"])
+            ),
+            target_frames=render_ftheta_cfg.get(
+                "frames", base_traj_cfg.get("frames", dataset.frame_num)
+            ),
+        )
+        video_output_dir = f"{cfg.log_dir}/videos{post_fix}/novel_ftheta_{step}"
+        os.makedirs(video_output_dir, exist_ok=True)
+        for traj_type, traj in render_traj.items():
+            render_data = dataset.prepare_novel_view_render_data(
+                traj,
+                camera_model="ftheta",
+                camera_id=render_ftheta_cfg.get("camera_id", None),
+                height=render_ftheta_cfg.get("height", None),
+                width=render_ftheta_cfg.get("width", None),
+                ftheta_parameters=render_ftheta_cfg.get("ftheta_parameters", None),
+                render_mode=ftheta_render_mode,
+            )
+            save_path = os.path.join(video_output_dir, f"{traj_type}.mp4")
+            render_novel_views(
+                trainer, render_data, save_path,
+                fps=render_ftheta_cfg.get("fps", base_traj_cfg.get("fps", cfg.render.fps)),
+            )
+            del render_data
+            torch.cuda.empty_cache()
+            logger.info(f"Saved FTheta view video for trajectory type: {traj_type} to {save_path}")
             
 def main(args):
     log_dir = os.path.dirname(args.resume_from)
@@ -231,6 +285,8 @@ def main(args):
     if cfg.render.vis_error:
         render_keys.insert(render_keys.index("rgbs") + 1, "rgb_error_maps")
     
+    render_keys = cfg.render.get("keys", render_keys)
+
     if args.save_catted_videos:
         cfg.logging.save_seperate_video = False
     

@@ -55,7 +55,8 @@ class GsplatRenderTabState(RenderTabState):
         "turbo", "viridis", "magma", "inferno", "cividis", "gray"
     ] = "turbo"
     rasterize_mode: Literal["classic", "antialiased"] = "classic"
-    camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole"
+    camera_model: Literal["pinhole", "ortho", "fisheye", "ftheta"] = "pinhole"
+    ftheta_calibration: str = ""
     rendering_mode: Literal["standard", "gut + eval3d", "geer + eval3d"] = "standard"
     radial_k1: float = 0.0
     radial_k2: float = 0.0
@@ -385,7 +386,7 @@ class GsplatViewer(Viewer):
         with self._camera_intrinsics_folder:
             camera_model_dropdown = server.gui.add_dropdown(
                 "Camera Model",
-                ("pinhole", "ortho", "fisheye"),
+                ("pinhole", "ortho", "fisheye", "ftheta"),
                 initial_value=self.render_tab_state.camera_model,
                 hint="Camera model used for rendering.",
                 order=0.0,
@@ -463,6 +464,17 @@ class GsplatViewer(Viewer):
                     setattr(self.render_tab_state, attr, float(slider.value))
                     self.rerender(_)
 
+            ftheta_path = server.gui.add_text(
+                "FTheta calibration JSON",
+                initial_value=self.render_tab_state.ftheta_calibration,
+                hint="Leave empty to use the selected dataset camera calibration.",
+            )
+
+            @ftheta_path.on_update
+            def _(_):
+                self.render_tab_state.ftheta_calibration = ftheta_path.value
+                self.rerender(_)
+
             def _sync_distortion_ui_enabled() -> None:
                 sliders = (
                     radial_k1_slider,
@@ -476,9 +488,10 @@ class GsplatViewer(Viewer):
                     thin_prism_s1_slider,
                     thin_prism_s2_slider,
                 )
-                fisheye = camera_model_dropdown.value == "fisheye"
+                fisheye = camera_model_dropdown.value in ("fisheye", "ftheta")
+                ftheta_path.disabled = camera_model_dropdown.value != "ftheta"
                 for slider in sliders[:4]:
-                    slider.disabled = False
+                    slider.disabled = camera_model_dropdown.value == "ftheta"
                 for slider in sliders[4:]:
                     slider.disabled = fisheye
 
@@ -1023,6 +1036,7 @@ def _get_viewdirs(
     radial_coeffs: Optional[torch.Tensor] = None,
     tangential_coeffs: Optional[torch.Tensor] = None,
     thin_prism_coeffs: Optional[torch.Tensor] = None,
+    ftheta_coeffs=None,
 ) -> torch.Tensor:
     if K.is_cuda:
         raymap = compute_raymap(
@@ -1030,6 +1044,7 @@ def _get_viewdirs(
             width,
             height,
             camera_model=camera_model,
+            ftheta_coeffs=ftheta_coeffs,
             radial_coeffs=radial_coeffs[None] if radial_coeffs is not None else None,
             tangential_coeffs=(
                 tangential_coeffs[None] if tangential_coeffs is not None else None
@@ -1061,6 +1076,7 @@ def _get_image_infos(
     tangential_coeffs: Optional[torch.Tensor] = None,
     thin_prism_coeffs: Optional[torch.Tensor] = None,
     extra_infos: Optional[dict] = None,
+    ftheta_coeffs=None,
 ) -> dict:
     viewdirs = _get_viewdirs(
         width,
@@ -1068,6 +1084,7 @@ def _get_image_infos(
         c2w,
         K,
         camera_model=camera_model,
+        ftheta_coeffs=ftheta_coeffs,
         radial_coeffs=radial_coeffs,
         tangential_coeffs=tangential_coeffs,
         thin_prism_coeffs=thin_prism_coeffs,
@@ -1238,13 +1255,53 @@ def make_viewer_render_fn(
             tangential_coeffs = None
             thin_prism_coeffs = None
 
+        ftheta_parameters = None
+        ftheta_coeffs = None
+        if camera_model == "ftheta":
+            from utils.geometry import scale_ftheta_calibration
+            from gsplat.cuda._wrapper import FThetaCameraDistortionParameters, FThetaPolynomialType
+
+            if not with_eval3d:
+                raise ValueError("FTheta viewing requires UT or GEER")
+            if with_geer and not trainer._geer_supports_ftheta:
+                raise RuntimeError(
+                    "Install GEER with native FTheta bounds support; see docs/PhysicalAI.md"
+                )
+            context = (
+                image_context_getter(frame_idx, int(height), int(width), device)
+                if image_context_getter
+                else {}
+            )
+            path = render_tab_state.ftheta_calibration.strip()
+            if path:
+                with open(path) as stream:
+                    calibration = json.load(stream)
+            else:
+                calibration = context.get("_ftheta_parameters")
+            if calibration is None:
+                raise ValueError("Select a PhysicalAI camera or provide an FTheta calibration JSON")
+            ftheta_parameters = scale_ftheta_calibration(
+                calibration, int(width), int(height), fit=True
+            )
+            K = torch.eye(3, device=device)
+            K[:2, 2] = K.new_tensor(ftheta_parameters["principal_point"]) + 0.5
+            p = ftheta_parameters
+            ftheta_coeffs = FThetaCameraDistortionParameters(
+                reference_poly=FThetaPolynomialType[p["reference_poly"]],
+                pixeldist_to_angle_poly=tuple(p["pixeldist_to_angle_poly"]),
+                angle_to_pixeldist_poly=tuple(p["angle_to_pixeldist_poly"]),
+                max_angle=float(p["max_angle"]),
+                linear_cde=tuple(p["linear_cde"]),
+            )
+            radial_coeffs = tangential_coeffs = thin_prism_coeffs = None
+
         def get_image_infos() -> dict:
             extra_infos = (
                 image_context_getter(frame_idx, int(height), int(width), device)
                 if image_context_getter is not None
                 else None
             )
-            return _get_image_infos(
+            infos = _get_image_infos(
                 width,
                 height,
                 c2w,
@@ -1254,7 +1311,17 @@ def make_viewer_render_fn(
                 tangential_coeffs=tangential_coeffs,
                 thin_prism_coeffs=thin_prism_coeffs,
                 extra_infos=extra_infos,
+                ftheta_coeffs=ftheta_coeffs,
             )
+            if ftheta_parameters is not None:
+                from utils.geometry import camera_model_rays
+
+                rays, valid = camera_model_rays(
+                    int(height), int(width), K, "ftheta", ftheta_parameters=ftheta_parameters
+                )
+                infos["viewdirs"] = rays @ c2w[:3, :3].T
+                infos["egocar_masks"] = (~valid).float()
+            return infos
 
         cam = dataclass_camera(
             camtoworlds=c2w,
@@ -1303,6 +1370,7 @@ def make_viewer_render_fn(
                 render_mode=render_mode_arg,
                 rasterize_mode=rasterize_mode,
                 camera_model=camera_model,
+                ftheta_coeffs=ftheta_coeffs,
                 packed=False,
                 with_ut=with_ut,
                 with_geer=with_geer,
@@ -1424,6 +1492,9 @@ def make_viewer_render_fn(
             renders = (
                 apply_float_colormap(alpha, colormap).cpu().numpy()
             )
+        if ftheta_parameters is not None:
+            valid = 1.0 - get_image_infos()["egocar_masks"]
+            renders = renders * valid.cpu().numpy()[..., None]
         return renders
 
     return viewer_render_fn
@@ -2294,6 +2365,8 @@ def _camera_state_from_camera(camera, frame_idx: int) -> dict:
 
     height = float(getattr(camera, "HEIGHT"))
     fy = float(K[1, 1])
+    if getattr(camera, "camera_model", "pinhole") == "ftheta":
+        fy = height / (2 * np.tan(np.radians(60) / 2))
     position = c2w[:3, 3].astype(np.float64)
     look_at = (position + c2w[:3, 2]).astype(np.float64)
     up_direction = (-c2w[:3, 1]).astype(np.float64)
@@ -2353,6 +2426,8 @@ def _dataset_camera_tools(dataset) -> dict:
             context["normed_time"] = torch.ones(
                 (height, width), dtype=torch.float32, device=device
             ) * normed_time
+        if hasattr(camera, "ftheta_parameters"):
+            context["_ftheta_parameters"] = camera.ftheta_parameters
         return context
 
     return {

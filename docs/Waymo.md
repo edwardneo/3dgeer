@@ -47,8 +47,6 @@ Download the [scene flow version](https://console.cloud.google.com/storage/brows
 
 </details>
 
-</details>
-
 ## 3. Preprocess the data
 After downloading the raw dataset, you'll need to preprocess this compressed data to extract and organize various components.
 
@@ -83,6 +81,10 @@ python datasets/preprocess.py \
     --process_keys images lidar calib pose dynamic_masks objects
 ```
 The extracted data will be stored in the `data/waymo/processed` directory.
+
+The `pose` step also exports camera poses and timing for rolling-shutter rendering.
+For existing scenes, rerun preprocessing with `--process_keys pose` before native
+training. See the [3DGEER guide](../configs/3dgeer.md) for renderer settings.
 
 ## 4. Extract Masks
 
@@ -186,6 +188,9 @@ ProjectPath/data/
               │  ├──images/             # Images: {timestep:03d}_{cam_id}.jpg
               │  ├──lidar/              # LiDAR data: {timestep:03d}.bin
               │  ├──ego_pose/           # Ego vehicle poses: {timestep:03d}.txt
+              │  ├──camera_pose_start/  # Exposure-start camera poses: {timestep:03d}_{cam_id}.txt
+              │  ├──camera_pose/        # Exposure-end camera poses: {timestep:03d}_{cam_id}.txt
+              │  ├──camera_timing/      # Camera exposure timing: {timestep:03d}_{cam_id}.json
               │  ├──extrinsics/         # Camera extrinsics: {cam_id}.txt
               │  ├──intrinsics/         # Camera intrinsics: {cam_id}.txt
               │  ├──sky_masks/          # Sky masks: {timestep:03d}_{cam_id}.png
